@@ -1,0 +1,9 @@
+app = "reactor-v2-backup"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

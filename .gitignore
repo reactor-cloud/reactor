@@ -1,0 +1,16 @@
+/target
+.data
+.reactor
+reactor.toml
+**/*.pem
+.DS_Store
+.env
+.env.*
+*.local
+node_modules
+dist
+.astro
+**/.gradle
+deploy/fly/.state
+deploy/aws/.state
+deploy/lambda/bun-layer/

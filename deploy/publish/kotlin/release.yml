@@ -1,0 +1,30 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  maven:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Publish to Maven Central
+        env:
+          MAVEN_CENTRAL_TOKEN: ${{ secrets.MAVEN_CENTRAL_TOKEN }}
+          MAVEN_GPG_KEY: ${{ secrets.MAVEN_GPG_KEY }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        run: |
+          if [ -z "${MAVEN_CENTRAL_TOKEN}" ] || [ -z "${MAVEN_GPG_KEY}" ]; then
+            echo "MAVEN_CENTRAL_TOKEN or MAVEN_GPG_KEY is not set; skipping Maven Central"
+            exit 0
+          fi
+          chmod +x gradlew
+          ./gradlew :reactor-client:publish --no-daemon

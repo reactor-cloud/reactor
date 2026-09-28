@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Todos</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Todos</h1>
+        <p>A project on this Reactor cluster.</p>
+      </header>
+      <section id="signed-out">
+        <form id="signup">
+          <h2>Create an account</h2>
+          <input name="email" type="email" placeholder="Email" required />
+          <input name="password" type="password" placeholder="Password" required />
+          <button>Sign up</button>
+        </form>
+        <form id="login">
+          <h2>Log in</h2>
+          <input name="email" type="email" placeholder="Email" required />
+          <input name="password" type="password" placeholder="Password" required />
+          <button>Log in</button>
+        </form>
+      </section>
+      <section id="signed-in" hidden>
+        <form id="add">
+          <input name="title" placeholder="New todo" required />
+          <button>Add</button>
+        </form>
+        <ul id="list"></ul>
+        <form id="upload">
+          <input name="file" type="file" required />
+          <button>Upload</button>
+        </form>
+        <p id="file-note"></p>
+        <button id="ping" type="button">Call ping function</button>
+        <pre id="ping-out"></pre>
+        <button id="logout" type="button">Log out</button>
+      </section>
+      <p id="error"></p>
+    </main>
+    <script src="/config.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

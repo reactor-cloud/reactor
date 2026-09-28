@@ -1,0 +1,26 @@
+app = "reactor-v2-db"
+primary_region = "fra"
+
+[build]
+  image = "postgres:16"
+
+[env]
+  POSTGRES_USER = "reactor"
+  POSTGRES_DB = "reactor"
+  PGDATA = "/var/lib/postgresql/data/pgdata"
+
+[mounts]
+  source = "pg_data"
+  destination = "/var/lib/postgresql/data"
+
+[checks]
+  [checks.pg]
+    type = "tcp"
+    port = 5432
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "60s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

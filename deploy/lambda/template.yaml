@@ -1,0 +1,626 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Reactor v2 on one Lambda, private Aurora Serverless v2, S3, and a Fargate site service.
+
+Conditions:
+  HasCert: !Not [!Equals [!Ref CertificateArn, ""]]
+
+Parameters:
+  ImageUri:
+    Type: String
+  AgentSecretName:
+    Type: String
+    Default: reactor-v2/openrouter
+  JwtSecretName:
+    Type: String
+    Default: reactor-v2/jwt
+  EngineVersion:
+    Type: String
+    Default: "16.8"
+  PublicUrl:
+    Type: String
+    Default: https://pending.invalid
+  BaseDomain:
+    Type: String
+    Default: apps.example.com
+  CertificateArn:
+    Type: String
+    Default: ""
+
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 1024
+    Architectures:
+      - arm64
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.42.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.42.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.42.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.42.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.42.3.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+
+  PublicAssociationB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  NatEip:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEip.AllocationId
+      SubnetId: !Ref PublicSubnet
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateAssociationA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateAssociationB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+
+  LambdaSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Reactor Lambda
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  DbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Reactor Aurora
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref LambdaSg
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref EcsSg
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Reactor Aurora
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+
+  DbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      GenerateSecretString:
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+  AuthenticatorSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      GenerateSecretString:
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+  OperatorSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      GenerateSecretString:
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+  DbCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      Engine: aurora-postgresql
+      EngineVersion: !Ref EngineVersion
+      DatabaseName: reactor
+      MasterUsername: reactor
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DbSecret}:SecretString}}"
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref DbSg
+      StorageEncrypted: true
+      BackupRetentionPeriod: 1
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: 0.5
+        MaxCapacity: 1
+
+  DbInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      Engine: aurora-postgresql
+      DBInstanceClass: db.serverless
+      DBClusterIdentifier: !Ref DbCluster
+      PubliclyAccessible: false
+
+  ReactorBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ReactorFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - DbInstance
+      - PrivateRoute
+    Properties:
+      FunctionName: reactor-v2
+      PackageType: Image
+      ImageUri: !Ref ImageUri
+      Timeout: 300
+      MemorySize: 1024
+      EphemeralStorage:
+        Size: 1024
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSg
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+      Environment:
+        Variables:
+          REACTOR_RUNTIME__MODE: lambda
+          REACTOR_RUNTIME__BASE_DOMAIN: apps.invalid
+          REACTOR_AUTH__PROVIDER: internal
+          REACTOR_AUTH__OPERATOR_TOKEN: !Sub "{{resolve:secretsmanager:${OperatorSecret}:SecretString}}"
+          REACTOR_DATABASE__URL: !Sub
+            - "postgres://reactor:{{resolve:secretsmanager:${DbSecret}:SecretString}}@${Host}:5432/reactor?sslmode=require"
+            - Host: !GetAtt DbCluster.Endpoint.Address
+          REACTOR_DATABASE__AUTHENTICATOR_PASSWORD: !Sub "{{resolve:secretsmanager:${AuthenticatorSecret}:SecretString}}"
+          PGRST_DB_URI: !Sub
+            - "postgres://authenticator:{{resolve:secretsmanager:${AuthenticatorSecret}:SecretString}}@${Host}:5432/reactor?sslmode=require"
+            - Host: !GetAtt DbCluster.Endpoint.Address
+          REACTOR_JWT_PRIVATE_PEM: !Sub "{{resolve:secretsmanager:${JwtSecretName}:SecretString:private_pem}}"
+          REACTOR_JWT_PUBLIC_JWK: !Sub "{{resolve:secretsmanager:${JwtSecretName}:SecretString:public_jwk}}"
+          REACTOR_STORAGE__BACKEND: s3
+          REACTOR_STORAGE__BUCKET: !Ref ReactorBucket
+          REACTOR_STORAGE__REGION: !Ref AWS::Region
+          REACTOR_FUNCTIONS__RUNTIME: bun
+          REACTOR_FUNCTIONS__WORKDIR: /tmp/functions
+          REACTOR_FUNCTIONS__BUN: /usr/local/bin/bun
+          REACTOR_FUNCTIONS__PUBLISHER: fake
+          REACTOR_POSTGREST__URL: http://127.0.0.1:3000
+          REACTOR_PGRST_CONF: /tmp/postgrest.conf
+          REACTOR_SQL_DIR: /app/sql
+          REACTOR_CONSOLE_DIR: /app/console
+          REACTOR_HTTP__PUBLIC_URL: !Ref PublicUrl
+          REACTOR_AGENT__API_KEY: !Sub "{{resolve:secretsmanager:${AgentSecretName}:SecretString:api_key}}"
+          REACTOR_AGENT__BASE_URL: https://openrouter.ai/api/v1
+          REACTOR_AGENT__MODEL: anthropic/claude-sonnet-4.6
+      Policies:
+        - VPCAccessPolicy: {}
+        - Statement:
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:reactor-v2
+            - Effect: Allow
+              Action:
+                - lambda:GetFunction
+                - lambda:CreateFunction
+                - lambda:UpdateFunctionCode
+                - lambda:UpdateFunctionConfiguration
+                - lambda:InvokeFunction
+              Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*-*
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+                - s3:GetBucketLocation
+                - s3:GetBucketCors
+                - s3:PutBucketCors
+                - s3:CreateBucket
+              Resource: !GetAtt ReactorBucket.Arn
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+                - s3:DeleteObject
+              Resource: !Sub ${ReactorBucket.Arn}/*
+      Events:
+        Root:
+          Type: HttpApi
+          Properties:
+            Method: ANY
+            Path: /
+            PayloadFormatVersion: "2.0"
+            TimeoutInMillis: 29000
+        Proxy:
+          Type: HttpApi
+          Properties:
+            Method: ANY
+            Path: /{proxy+}
+            PayloadFormatVersion: "2.0"
+            TimeoutInMillis: 29000
+
+  BunLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: reactor-bun
+      ContentUri: bun-layer
+      CompatibleRuntimes:
+        - provided.al2023
+      CompatibleArchitectures:
+        - arm64
+
+  UserFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  EcsSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Reactor site tasks
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  AlbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Reactor site load balancer
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  EcsIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EcsSg
+      IpProtocol: tcp
+      FromPort: 8000
+      ToPort: 8000
+      SourceSecurityGroupId: !Ref AlbSg
+
+  SiteAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - !Ref AlbSg
+      Subnets:
+        - !Ref PublicSubnet
+        - !Ref PublicSubnetB
+
+  SiteTarget:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      TargetType: ip
+      Protocol: HTTP
+      Port: 8000
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: "200"
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref SiteAlb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - !If
+          - HasCert
+          - Type: redirect
+            RedirectConfig:
+              Protocol: HTTPS
+              Port: "443"
+              StatusCode: HTTP_301
+          - Type: forward
+            TargetGroupArn: !Ref SiteTarget
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasCert
+    Properties:
+      LoadBalancerArn: !Ref SiteAlb
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref SiteTarget
+
+  SiteCluster:
+    Type: AWS::ECS::Cluster
+
+  SiteLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /reactor/site
+      RetentionInDays: 7
+
+  EcsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  SiteTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: site-runtime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:GetFunction
+                  - lambda:CreateFunction
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:InvokeFunction
+                Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*-*
+              - Effect: Allow
+                Action: lambda:GetLayerVersion
+                Resource: !Ref BunLayer
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt UserFunctionRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: lambda.amazonaws.com
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                  - s3:GetBucketCors
+                  - s3:PutBucketCors
+                  - s3:CreateBucket
+                Resource: !GetAtt ReactorBucket.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub ${ReactorBucket.Arn}/*
+
+  SiteTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: reactor-site
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      Cpu: "512"
+      Memory: "1024"
+      RuntimePlatform:
+        CpuArchitecture: ARM64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt EcsExecutionRole.Arn
+      TaskRoleArn: !GetAtt SiteTaskRole.Arn
+      ContainerDefinitions:
+        - Name: reactor
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8000
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref SiteLogs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: site
+          Environment:
+            - Name: REACTOR_RUNTIME__MODE
+              Value: listen
+            - Name: REACTOR_RUNTIME__BASE_DOMAIN
+              Value: !Ref BaseDomain
+            - Name: REACTOR_HTTP__BIND
+              Value: 0.0.0.0:8000
+            - Name: REACTOR_HTTP__PUBLIC_URL
+              Value: !Ref PublicUrl
+            - Name: REACTOR_AUTH__PROVIDER
+              Value: internal
+            - Name: REACTOR_AUTH__OPERATOR_TOKEN
+              Value: !Sub "{{resolve:secretsmanager:${OperatorSecret}:SecretString}}"
+            - Name: REACTOR_DATABASE__URL
+              Value: !Sub
+                - "postgres://reactor:{{resolve:secretsmanager:${DbSecret}:SecretString}}@${Host}:5432/reactor?sslmode=require"
+                - Host: !GetAtt DbCluster.Endpoint.Address
+            - Name: REACTOR_DATABASE__AUTHENTICATOR_PASSWORD
+              Value: !Sub "{{resolve:secretsmanager:${AuthenticatorSecret}:SecretString}}"
+            - Name: PGRST_DB_URI
+              Value: !Sub
+                - "postgres://authenticator:{{resolve:secretsmanager:${AuthenticatorSecret}:SecretString}}@${Host}:5432/reactor?sslmode=require"
+                - Host: !GetAtt DbCluster.Endpoint.Address
+            - Name: REACTOR_JWT_PRIVATE_PEM
+              Value: !Sub "{{resolve:secretsmanager:${JwtSecretName}:SecretString:private_pem}}"
+            - Name: REACTOR_JWT_PUBLIC_JWK
+              Value: !Sub "{{resolve:secretsmanager:${JwtSecretName}:SecretString:public_jwk}}"
+            - Name: REACTOR_STORAGE__BACKEND
+              Value: s3
+            - Name: REACTOR_STORAGE__BUCKET
+              Value: !Ref ReactorBucket
+            - Name: REACTOR_STORAGE__REGION
+              Value: !Ref AWS::Region
+            - Name: REACTOR_FUNCTIONS__RUNTIME
+              Value: lambda
+            - Name: REACTOR_FUNCTIONS__PUBLISHER
+              Value: aws
+            - Name: REACTOR_FUNCTIONS__WORKDIR
+              Value: /tmp/functions
+            - Name: REACTOR_FUNCTIONS__BUN
+              Value: /usr/local/bin/bun
+            - Name: REACTOR_FUNCTIONS__LAMBDA_ROLE_ARN
+              Value: !GetAtt UserFunctionRole.Arn
+            - Name: REACTOR_FUNCTIONS__LAYER_ARN
+              Value: !Ref BunLayer
+            - Name: REACTOR_POSTGREST__URL
+              Value: http://127.0.0.1:3000
+            - Name: REACTOR_PGRST_CONF
+              Value: /tmp/postgrest.conf
+            - Name: REACTOR_SQL_DIR
+              Value: /app/sql
+            - Name: REACTOR_CONSOLE_DIR
+              Value: /app/console
+
+  SiteService:
+    Type: AWS::ECS::Service
+    DependsOn: HttpListener
+    Properties:
+      Cluster: !Ref SiteCluster
+      LaunchType: FARGATE
+      DesiredCount: 1
+      TaskDefinition: !Ref SiteTask
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref EcsSg
+          Subnets:
+            - !Ref PrivateSubnetA
+            - !Ref PrivateSubnetB
+      LoadBalancers:
+        - ContainerName: reactor
+          ContainerPort: 8000
+          TargetGroupArn: !Ref SiteTarget
+
+Outputs:
+  ApiUrl:
+    Value: !Sub https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com
+  AlbDns:
+    Value: !GetAtt SiteAlb.DNSName
+  BunLayerArn:
+    Value: !Ref BunLayer

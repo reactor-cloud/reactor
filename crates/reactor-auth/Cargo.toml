@@ -1,0 +1,28 @@
+[package]
+name = "reactor-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+reactor-identity = { path = "../reactor-identity" }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+jsonwebtoken = { workspace = true }
+ed25519-dalek = { workspace = true }
+pkcs8 = { version = "0.10", features = ["pem", "std"] }
+rand = { workspace = true }
+argon2 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+sqlx = { workspace = true }
+subtle = { workspace = true }
+aes-gcm = "0.10"
+
+[dev-dependencies]
+tokio = { workspace = true }

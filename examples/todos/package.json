@@ -1,0 +1,11 @@
+{
+  "name": "todos",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild site/main.js --bundle --format=iife --outfile=site/app.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.10"
+  }
+}

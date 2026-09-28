@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Self-host — Reactor</title>
+  <meta name="description" content="Run Reactor locally with Docker Compose. One image, Postgres, and a blob store.">
+  <meta name="theme-color" content="#141414">
+  <link rel="icon" href="reactor-logo.svg">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="bar">
+    <div class="bar-in">
+      <a class="brand" href="index.html"><img src="reactor-logo.svg" alt="" width="32" height="32"><span>Reactor</span></a>
+      <nav>
+        <a href="https://docs.reactor.cloud">Docs</a>
+        <a href="self-host.html" aria-current="page">Self-host</a>
+        <a href="cloud.html">Cloud</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap" id="main">
+    <article class="page">
+      <p class="eyebrow">Self-host</p>
+      <h1>Your machine, the whole server.</h1>
+      <p>From the <code>v2</code> directory, build the image and start Compose. The app listens on port 18000. The console is on that same origin.</p>
+      <pre>docker compose -f deploy/compose/compose.yaml build keys
+docker compose -f deploy/compose/compose.yaml up -d</pre>
+      <h2>What starts</h2>
+      <ul>
+        <li>Postgres for the control schema and every project schema.</li>
+        <li>A second Postgres, for a project that moves to its own database.</li>
+        <li>An S3-compatible blob store.</li>
+        <li>Reactor, with PostgREST beside it inside the image.</li>
+      </ul>
+      <p>Open <strong>http://127.0.0.1:18000/console</strong> and create the cluster. Project apps are served at <strong>http://{ref}.apps.localhost:18000/</strong>.</p>
+      <p>The same image is what you run on a VM, on Fly, or as Lambda. Clients keep the same URLs. The <a class="inline" href="https://docs.reactor.cloud/operate/self-hosting/">self-hosting guide</a> covers configuration, the CLI, and the first project.</p>
+    </article>
+  </main>
+  <footer class="foot">
+    <span>Reactor</span>
+    <a href="https://docs.reactor.cloud">Documentation</a>
+  </footer>
+</body>
+</html>

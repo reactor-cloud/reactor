@@ -1,0 +1,132 @@
+name: reactor-v2
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: reactor
+      POSTGRES_PASSWORD: reactor
+      POSTGRES_DB: reactor
+    ports:
+      - "127.0.0.1:5440:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reactor -d reactor"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  postgres-dedicated:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: reactor
+      POSTGRES_PASSWORD: reactor
+      POSTGRES_DB: reactor
+    ports:
+      - "127.0.0.1:5441:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reactor -d reactor"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  minio:
+    image: rustfs/rustfs:latest
+    environment:
+      RUSTFS_ACCESS_KEY: minio
+      RUSTFS_SECRET_KEY: minioadmin
+    ports:
+      - "127.0.0.1:19000:9000"
+    volumes:
+      - minio:/data
+
+  mailpit:
+    image: axllent/mailpit:v1.21
+    ports:
+      - "127.0.0.1:8025:8025"
+
+  keys:
+    image: reactor-v2:local
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    entrypoint: ["/usr/local/bin/reactor-server", "jwt-init", "--out", "/keys"]
+    volumes:
+      - keys:/keys
+
+  reactor:
+    image: reactor-v2:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-dedicated:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      mailpit:
+        condition: service_started
+      keys:
+        condition: service_completed_successfully
+    environment: &app_env
+      AUTH_PASSWORD: authenticator
+      PGHOST: postgres
+      DEDICATED_PG_HOST: postgres-dedicated
+      REACTOR_DATABASE__URL: postgres://reactor:reactor@postgres:5432/reactor
+      REACTOR_DATABASE__DEDICATED_URL: postgres://reactor:reactor@postgres-dedicated:5432/reactor
+      REACTOR_DATABASE__AUTHENTICATOR_PASSWORD: authenticator
+      REACTOR_AUTH__PROVIDER: internal
+      REACTOR_AUTH__OPERATOR_TOKEN: dev-operator-token
+      REACTOR_AUTH__JWT_PRIVATE_PEM_FILE: /keys/private.pem
+      REACTOR_HTTP__BIND: 0.0.0.0:8000
+      REACTOR_HTTP__PUBLIC_URL: http://127.0.0.1:18000
+      REACTOR_RUNTIME__MODE: listen
+      REACTOR_RUNTIME__PLACE: docker
+      REACTOR_RUNTIME__BASE_DOMAIN: apps.localhost
+      REACTOR_STORAGE__BACKEND: s3
+      REACTOR_STORAGE__BUCKET: reactor
+      REACTOR_STORAGE__ENDPOINT: http://minio:9000
+      REACTOR_STORAGE__PUBLIC_ENDPOINT: http://127.0.0.1:19000
+      REACTOR_STORAGE__ACCESS_KEY: minio
+      REACTOR_STORAGE__SECRET_KEY: minioadmin
+      REACTOR_STORAGE__REGION: us-east-1
+      REACTOR_FUNCTIONS__RUNTIME: bun
+      REACTOR_FUNCTIONS__WORKDIR: /data/functions
+      REACTOR_FUNCTIONS__BUN: /usr/local/bin/bun
+      REACTOR_FUNCTIONS__PUBLISHER: fake
+      REACTOR_SITES__IDLE_SECS: "2"
+      REACTOR_POSTGREST__URL: http://127.0.0.1:3000
+      REACTOR_POSTGREST__DEDICATED_URL: http://127.0.0.1:3001
+      REACTOR_SQL_DIR: /app/sql
+      REACTOR_DNS_STUB_FILE: /dns/stub.json
+      REACTOR_AGENT__API_KEY: ${REACTOR_AGENT__API_KEY:-}
+      REACTOR_AGENT__MODEL: ${REACTOR_AGENT__MODEL:-anthropic/claude-sonnet-4.6}
+    ports:
+      - "127.0.0.1:18000:8000"
+    volumes:
+      - keys:/keys:ro
+      - functions-a:/data/functions
+      - ../../sql:/app/sql
+      - ../../.data/dns:/dns
+    container_name: reactor-v2-app
+
+  reactor-2:
+    image: reactor-v2:local
+    depends_on:
+      reactor:
+        condition: service_started
+    environment:
+      <<: *app_env
+      REACTOR_HTTP__PUBLIC_URL: http://127.0.0.1:18001
+    ports:
+      - "127.0.0.1:18001:8000"
+    volumes:
+      - keys:/keys:ro
+      - functions-b:/data/functions
+      - ../../sql:/app/sql
+      - ../../.data/dns:/dns
+    container_name: reactor-v2-app-2
+
+volumes:
+  keys:
+  minio:
+  functions-a:
+  functions-b:

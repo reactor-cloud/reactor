@@ -1,0 +1,22 @@
+[package]
+name = "reactor-accept"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+sqlx = { workspace = true }
+uuid = { workspace = true }
+reactor-server = { path = "../reactor-server" }
+reactor-auth = { path = "../reactor-auth" }
+reactor-functions = { path = "../reactor-functions" }
+zip = { workspace = true }
+bytes = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+http-body-util = { workspace = true }
+futures = "0.3"

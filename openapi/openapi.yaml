@@ -1,0 +1,675 @@
+# Public HTTP API for Reactor v1.26.09-beta.1.
+# The console API is operator-only and is specified in docs/operate/console.md.
+# /data/v1 is PostgREST. Use PostgREST's own OpenAPI for that surface.
+openapi: 3.0.3
+info:
+  title: Reactor
+  version: 1.26.09-beta.1
+  license:
+    name: BUSL-1.1
+    url: https://mariadb.com/bsl11/
+  description: |
+    Auth, storage, functions, sites, health, and platform routes.
+    Data stays on PostgREST at /data/v1.
+servers:
+  - url: http://127.0.0.1:18000
+    description: Local Compose
+tags:
+  - name: health
+  - name: platform
+  - name: auth
+  - name: storage
+  - name: functions
+  - name: sites
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Postgres and the blob store are reachable
+      responses:
+        "200":
+          description: Ready
+          headers:
+            x-request-id:
+              $ref: "#/components/headers/RequestId"
+  /platform/v1/projects:
+    get:
+      tags: [platform]
+      summary: List project refs
+      security: [{operator: []}]
+      responses:
+        "200":
+          description: Refs
+    post:
+      tags: [platform]
+      summary: Create a project
+      security: [{operator: []}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string}
+      responses:
+        "200":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ref, anon_key, service_key]
+                properties:
+                  ref: {type: string}
+                  anon_key: {type: string}
+                  service_key: {type: string}
+  /platform/v1/projects/{ref}:
+    patch:
+      tags: [platform]
+      summary: Point a project at a dedicated database
+      security: [{operator: []}]
+      parameters:
+        - $ref: "#/components/parameters/Ref"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [database_url]
+              properties:
+                database_url: {type: string}
+      responses:
+        "204":
+          description: Updated
+  /platform/v1/migrate:
+    post:
+      tags: [platform]
+      summary: Apply sql/project
+      security: [{operator: []}]
+      responses:
+        "200":
+          description: Applied
+  /platform/v1/domains/{host}/verify:
+    post:
+      tags: [platform]
+      summary: Mark a custom domain verified
+      security: [{operator: []}]
+      parameters:
+        - $ref: "#/components/parameters/Host"
+      responses:
+        "200":
+          description: Verified
+  /ask:
+    get:
+      tags: [platform]
+      summary: 200 when the custom domain is verified
+      parameters:
+        - name: domain
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Verified
+        "404":
+          description: Unknown
+  /auth/v1/signup:
+    post:
+      tags: [auth]
+      summary: Create a user and a session
+      parameters:
+        - $ref: "#/components/parameters/ApiKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailPassword"
+      responses:
+        "200":
+          description: Session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "409":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Limited"
+  /auth/v1/token:
+    post:
+      tags: [auth]
+      summary: Password login or refresh
+      parameters:
+        - $ref: "#/components/parameters/ApiKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/EmailPassword"
+                - type: object
+                  required: [refresh_token]
+                  properties:
+                    refresh_token: {type: string}
+      responses:
+        "200":
+          description: Session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Error"
+        "429":
+          description: Password login only. Refresh is not limited.
+          headers:
+            Retry-After:
+              schema: {type: string}
+  /auth/v1/logout:
+    post:
+      tags: [auth]
+      summary: Delete a refresh session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: {type: string}
+      responses:
+        "204":
+          description: Deleted
+  /auth/v1/user:
+    get:
+      tags: [auth]
+      summary: The signed-in user
+      security: [{user: []}]
+      responses:
+        "200":
+          description: User
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Error"
+  /auth/v1/magic-link:
+    post:
+      tags: [auth]
+      summary: Send a magic link
+      parameters:
+        - $ref: "#/components/parameters/ApiKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Email"
+      responses:
+        "200":
+          description: Always ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ok"
+        "429":
+          $ref: "#/components/responses/Limited"
+  /auth/v1/verify:
+    post:
+      tags: [auth]
+      summary: Consume a magic-link token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Token"
+      responses:
+        "200":
+          description: Session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Error"
+  /auth/v1/recover:
+    post:
+      tags: [auth]
+      summary: Send a recovery message
+      parameters:
+        - $ref: "#/components/parameters/ApiKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Email"
+      responses:
+        "200":
+          description: Always ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ok"
+        "429":
+          $ref: "#/components/responses/Limited"
+  /auth/v1/recover/complete:
+    post:
+      tags: [auth]
+      summary: Set a password from a recovery token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TokenPassword"
+      responses:
+        "200":
+          description: Session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Error"
+  /auth/v1/invite:
+    post:
+      tags: [auth]
+      summary: Invite an email
+      security: [{service: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Email"
+      responses:
+        "200":
+          description: Sent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ok"
+        "409":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Limited"
+  /auth/v1/invite/accept:
+    post:
+      tags: [auth]
+      summary: Accept an invite
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TokenPassword"
+      responses:
+        "200":
+          description: Session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Error"
+  /storage/v1/object/presign:
+    post:
+      tags: [storage]
+      summary: Presign an upload or download
+      security: [{project: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bucket, key, method]
+              properties:
+                bucket: {type: string}
+                key: {type: string}
+                method: {type: string, enum: [GET, PUT]}
+      responses:
+        "200":
+          description: Signed URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  url: {type: string}
+  /storage/v1/signed:
+    get:
+      tags: [storage]
+      summary: Download through a signed URL
+      parameters:
+        - $ref: "#/components/parameters/SignedQuery"
+      responses:
+        "200":
+          description: Object bytes
+    put:
+      tags: [storage]
+      summary: Upload through a signed URL
+      parameters:
+        - $ref: "#/components/parameters/SignedQuery"
+      requestBody:
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+      responses:
+        "200":
+          description: Stored
+  /fn/v1/{name}:
+    post:
+      tags: [functions]
+      summary: Invoke a function
+      security: [{project: []}]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200":
+          description: Function stdout
+  /fn/v1/_admin/functions/{name}:
+    post:
+      tags: [functions]
+      summary: Deploy a function zip
+      security: [{service: []}]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: {type: string}
+        - name: promote
+          in: query
+          schema: {type: boolean, default: true}
+      requestBody:
+        required: true
+        content:
+          application/zip:
+            schema: {type: string, format: binary}
+      responses:
+        "200":
+          description: Deployed
+  /fn/v1/_admin/schedules:
+    post:
+      tags: [functions]
+      summary: Create a schedule
+      security: [{service: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [function_name, body]
+              properties:
+                function_name: {type: string}
+                body: {type: string}
+      responses:
+        "200":
+          description: Created
+  /fn/v1/_internal/cron:
+    post:
+      tags: [functions]
+      summary: Run due schedules
+      security: [{operator: []}]
+      responses:
+        "200":
+          description: Ran
+  /sites/v1/deployments:
+    post:
+      tags: [sites]
+      summary: Start a deployment
+      security: [{service: []}]
+      responses:
+        "200":
+          description: Deployment id
+  /sites/v1/deployments/{id}/files/{path}:
+    put:
+      tags: [sites]
+      summary: Upload one deployment file
+      security: [{service: []}]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+        - $ref: "#/components/parameters/Path"
+      responses:
+        "200":
+          description: Stored
+  /sites/v1/deployments/{id}/finish:
+    post:
+      tags: [sites]
+      summary: Publish a deployment
+      security: [{service: []}]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: Ready
+  /sites/v1/deployments/{id}/fail:
+    post:
+      tags: [sites]
+      summary: Mark a deployment failed
+      security: [{service: []}]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          description: Failed
+  /sites/v1/files/{path}:
+    put:
+      tags: [sites]
+      summary: Upload a live site file
+      security: [{service: []}]
+      parameters:
+        - $ref: "#/components/parameters/Path"
+      responses:
+        "200":
+          description: Stored
+  /sites/v1/env:
+    get:
+      tags: [sites]
+      summary: List site variables
+      security: [{service: []}]
+      responses:
+        "200":
+          description: Variables
+    put:
+      tags: [sites]
+      summary: Set a site variable
+      security: [{service: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, value]
+              properties:
+                key: {type: string}
+                value: {type: string}
+      responses:
+        "204":
+          description: Stored
+  /sites/v1/routes:
+    post:
+      tags: [sites]
+      summary: Map a path to a function
+      security: [{service: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path, function]
+              properties:
+                path: {type: string}
+                function: {type: string}
+      responses:
+        "200":
+          description: Mapped
+  /sites/v1/domains:
+    post:
+      tags: [sites]
+      summary: Add a custom domain
+      security: [{service: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [host]
+              properties:
+                host: {type: string}
+      responses:
+        "200":
+          description: Added
+  /sites/v1/domains/{host}/verify:
+    post:
+      tags: [sites]
+      summary: Start domain verification
+      security: [{service: []}]
+      parameters:
+        - $ref: "#/components/parameters/Host"
+      responses:
+        "200":
+          description: Pending or verified
+  /sites/v1/domains/{host}:
+    delete:
+      tags: [sites]
+      summary: Remove a custom domain
+      security: [{service: []}]
+      parameters:
+        - $ref: "#/components/parameters/Host"
+      responses:
+        "200":
+          description: Removed
+components:
+  headers:
+    RequestId:
+      schema: {type: string}
+      description: Present on every response
+  parameters:
+    Ref:
+      name: ref
+      in: path
+      required: true
+      schema: {type: string}
+    Host:
+      name: host
+      in: path
+      required: true
+      schema: {type: string}
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: {type: string}
+    Path:
+      name: path
+      in: path
+      required: true
+      schema: {type: string}
+    ApiKey:
+      name: Authorization
+      in: header
+      required: false
+      description: Bearer anon key, or the project host
+      schema: {type: string}
+    SignedQuery:
+      name: signature
+      in: query
+      required: true
+      schema: {type: string}
+  schemas:
+    Email:
+      type: object
+      required: [email]
+      properties:
+        email: {type: string}
+    EmailPassword:
+      type: object
+      required: [email, password]
+      properties:
+        email: {type: string}
+        password: {type: string, minLength: 8}
+    Token:
+      type: object
+      required: [token]
+      properties:
+        token: {type: string}
+    TokenPassword:
+      type: object
+      required: [token, password]
+      properties:
+        token: {type: string}
+        password: {type: string, minLength: 8}
+    User:
+      type: object
+      properties:
+        id: {type: string}
+        email: {type: string}
+    Session:
+      type: object
+      properties:
+        access_token: {type: string}
+        refresh_token: {type: string}
+        user:
+          $ref: "#/components/schemas/User"
+    Ok:
+      type: object
+      properties:
+        ok: {type: boolean}
+    ErrorBody:
+      type: object
+      properties:
+        error: {type: string}
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorBody"
+    Limited:
+      description: Too many requests
+      headers:
+        Retry-After:
+          schema: {type: string, example: "60"}
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorBody"
+  securitySchemes:
+    operator:
+      type: http
+      scheme: bearer
+      description: Operator token
+    service:
+      type: http
+      scheme: bearer
+      description: Project service key
+    user:
+      type: http
+      scheme: bearer
+      description: User access token
+    project:
+      type: http
+      scheme: bearer
+      description: Anon key, user access token, or service key

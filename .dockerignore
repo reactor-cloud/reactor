@@ -1,0 +1,7 @@
+target
+.data
+.git
+*.md
+**/node_modules
+console/.env.local
+**/.env.local
