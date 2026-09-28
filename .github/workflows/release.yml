@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   image:
-    if: hashFiles('v2/Cargo.toml') == ''
+    if: github.repository == 'reactor-cloud/reactor'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
