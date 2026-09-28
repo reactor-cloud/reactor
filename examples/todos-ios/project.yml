@@ -37,4 +37,5 @@ targets:
       - package: Reactor
 packages:
   Reactor:
-    path: ../../sdks/swift
+    url: https://github.com/reactor-cloud/reactor-swift
+    from: 1.26.9-beta.1

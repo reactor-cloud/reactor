@@ -29,7 +29,8 @@ jobs:
       - name: Unit tests
         run: cargo test --workspace --exclude reactor-accept
       - name: Docs
-        working-directory: ${{ hashFiles('v2/Cargo.toml') != '' && 'v2/websites/docs' || 'websites/docs' }}
+        if: hashFiles('v2/websites/docs/package.json') != ''
+        working-directory: v2/websites/docs
         run: npm ci && npm run build
 
   accept:
@@ -51,7 +52,8 @@ jobs:
       - name: Accept
         run: scripts/accept.sh
       - name: JavaScript client
-        working-directory: ${{ hashFiles('v2/Cargo.toml') != '' && 'v2/sdks/js' || 'sdks/js' }}
+        if: hashFiles('v2/sdks/js/package.json') != ''
+        working-directory: v2/sdks/js
         run: |
           if [ -f "$GITHUB_WORKSPACE/v2/.data/sdk.env" ]; then
             set -a; source "$GITHUB_WORKSPACE/v2/.data/sdk.env"; set +a
@@ -62,7 +64,8 @@ jobs:
           npm test
           npm run test:contract
       - name: Kotlin client
-        working-directory: ${{ hashFiles('v2/Cargo.toml') != '' && 'v2/sdks/kotlin' || 'sdks/kotlin' }}
+        if: hashFiles('v2/sdks/kotlin/settings.gradle.kts') != ''
+        working-directory: v2/sdks/kotlin
         env:
           REACTOR_CLIENT_ONLY: "1"
         run: |
@@ -74,6 +77,7 @@ jobs:
           chmod +x gradlew
           ./gradlew :reactor-client:test --no-daemon
       - name: Swift client
+        if: hashFiles('v2/sdks/swift/Package.swift') != ''
         run: |
           set -a
           source .data/sdk.env

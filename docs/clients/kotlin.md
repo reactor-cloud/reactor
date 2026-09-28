@@ -3,7 +3,7 @@ title: Kotlin
 description: ReactorClient for Android and the JVM. Auth, a small query builder, storage, and functions.
 ---
 
-The module is `sdks/kotlin/reactor-client`, published as `sl.atomicollabs.reactor:reactor-client:1.26.9-beta.1`. It is source-available under the Business Source License 1.1. The git tag is `v1.26.09-beta.1`.
+The Kotlin client is published as `sl.atomicollabs.reactor:reactor-client:1.26.9-beta.1`. It is source-available under the Business Source License 1.1. The git tag is `v1.26.09-beta.1`.
 
 ```kotlin
 val reactor = ReactorClient("https://<ref>.example.com", anonKey)

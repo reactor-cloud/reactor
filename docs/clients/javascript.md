@@ -3,7 +3,7 @@ title: JavaScript
 description: createClient for auth, PostgREST data, storage, and functions.
 ---
 
-The client is `sdks/js`, published as `@reactor/client` at `1.26.9-beta.1` under BUSL-1.1. The prerelease dist-tag is `beta`.
+The JavaScript client is published as `@reactor/client` at `1.26.9-beta.1` under BUSL-1.1. The prerelease dist-tag is `beta`.
 
 ```sh
 npm install @reactor/client@beta

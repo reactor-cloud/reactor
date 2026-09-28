@@ -38,7 +38,7 @@ Clients:
 npm install @reactor/client@beta
 ```
 
-Swift package `https://github.com/Reactor/reactor-swift` at `1.26.9-beta.1`. Maven `sl.atomicollabs.reactor:reactor-client:1.26.9-beta.1`. The CLI is `brew tap Reactor/reactor && brew install reactor`. Source for all of them is this tag, `v1.26.09-beta.1`.
+Swift package `https://github.com/reactor-cloud/reactor-swift` at `1.26.9-beta.1`. Maven `sl.atomicollabs.reactor:reactor-client:1.26.9-beta.1`. The CLI is `brew tap reactor-cloud/reactor && brew install reactor`. Source for all of them is this tag, `v1.26.09-beta.1`.
 
 ## Not included
 

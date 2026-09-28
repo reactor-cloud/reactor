@@ -3,7 +3,7 @@ title: Swift
 description: ReactorClient for iOS and macOS. Auth, a small query builder, storage, and functions.
 ---
 
-The package is `sdks/swift`, published from tag `v1.26.09-beta.1` at `https://github.com/Reactor/reactor-swift`. It builds for iOS 17 and macOS 14. The product name is `Reactor`. It is source-available under BUSL-1.1, version `1.26.9-beta.1`.
+The Swift package is published from tag `v1.26.09-beta.1` at `https://github.com/reactor-cloud/reactor-swift`. It builds for iOS 17 and macOS 14. The product name is `Reactor`. It is source-available under BUSL-1.1, version `1.26.9-beta.1`.
 
 ```swift
 import Reactor
