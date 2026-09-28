@@ -1,10 +1,14 @@
 # Reactor
 
-Source-available backend for web and mobile apps. One stateless server serves auth, Postgres data through PostgREST, file storage, functions, and sites. Postgres and a blob store are the only dependencies.
+## Rust backend for web and mobile apps. 
+Host your own robust integrated backend with auth, data (PostgREST), file storage, functions, and sites. Deploy on AWS or Fly, or run it locally with Docker. 
+Replace Supabase + Vercel with a self hostable binary and an integrated CLI to improve AI deployment workflows.
 
-**v1.26.09-beta.1** (package version `1.26.9-beta.1`). The API can still change before a stable tag. On 2030-09-28 this version becomes Apache 2.0.
+[reactor.cloud](https://www.reactor.cloud)
 
-You may run Reactor for your own product, including a commercial one, and you may set it up for a client who operates it. You may not offer Reactor’s auth, data API, storage, functions, or sites to third parties as a hosted service without a commercial license from AtomicoLabs SL. See [LICENSE](LICENSE).
+**v1.26.09-beta.1** (package version `1.26.9-beta.1`). The API can still change before a stable tag.
+
+Postgres and a blob store are the only dependencies. One stateless server serves every surface.
 
 ## Start
 
@@ -21,14 +25,16 @@ Do not start the `keys` service on its own. That command only writes the JWT key
 
 ## What you get
 
-| Surface | Path | What it is |
-| --- | --- | --- |
-| Auth | `/auth/v1` | Users, sessions, magic links, recovery, invites |
-| Data | `/data/v1` | PostgREST, with row-level security |
-| Storage | `/storage/v1` | Presigned uploads and downloads |
-| Functions | `/fn/v1` | Bun or Lambda, with versions and pins |
-| Sites | project host | Static files, a site process, or a function path |
-| Console | `/console` | Cluster admin. Separate from project users |
+
+| Surface   | Path          | What it is                                       |
+| --------- | ------------- | ------------------------------------------------ |
+| Auth      | `/auth/v1`    | Users, sessions, magic links, recovery, invites  |
+| Data      | `/data/v1`    | PostgREST, with row-level security               |
+| Storage   | `/storage/v1` | Presigned uploads and downloads                  |
+| Functions | `/fn/v1`      | Bun or Lambda, with versions and pins            |
+| Sites     | project host  | Static files, a site process, or a function path |
+| Console   | `/console`    | Cluster admin. Separate from project users       |
+
 
 Docs: [concepts](docs/start/concepts.md), [quickstart](docs/start/quickstart.md), [self-hosting](docs/operate/self-hosting.md).
 
@@ -50,4 +56,6 @@ Realtime, OAuth, project-user MFA, analytics, and billing are not part of this r
 
 ## License
 
-Business Source License 1.1. Copyright 2026 AtomicoLabs SL and Claudio del Conde.
+Reactor uses a permissive license. You can use it as the backend for as many personal or commercial projects as you want, and you can set it up for a client who runs it themselves. The only restriction is offering competing hosting: you may not provide Reactor’s auth, data, storage, functions, or sites to other people as a hosted service without a commercial license from AtomicoLabs SL.
+
+Business Source License 1.1. Copyright 2026 AtomicoLabs SL and Claudio del Conde. This version becomes Apache 2.0 on 2030-09-28. See [LICENSE](LICENSE).
