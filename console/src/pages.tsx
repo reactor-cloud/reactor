@@ -148,7 +148,7 @@ function Center({ title, subtitle, children }: { title: string; subtitle: string
     <div className="flex min-h-screen items-center justify-center bg-muted/40 p-6">
       <Card className="w-full max-w-md">
         <CardHeader>
-          <Logo className="mb-2 size-12 rounded-lg" />
+          <Logo className="mb-2 size-12" />
           <CardTitle>{title}</CardTitle>
           <p className="text-sm text-muted-foreground">{subtitle}</p>
         </CardHeader>
@@ -328,9 +328,9 @@ function KeyRow({
 
 export function Users() {
   const { ref = "" } = useParams()
-  const [rows, setRows] = useState<{ id: string; email: string; created_at: string }[]>([])
+  const [rows, setRows] = useState<{ id: string; email: string; created_at: string; email_verified_at: string | null }[]>([])
   useEffect(() => {
-    api<{ id: string; email: string; created_at: string }[]>(`/console/v1/projects/${ref}/users`).then(setRows)
+    api<{ id: string; email: string; created_at: string; email_verified_at: string | null }[]>(`/console/v1/projects/${ref}/users`).then(setRows)
   }, [ref])
   return (
     <div className="grid gap-4">
@@ -343,6 +343,7 @@ export function Users() {
           <TableHeader>
             <TableRow>
               <TableHead>Email</TableHead>
+              <TableHead>Verified</TableHead>
               <TableHead>Created</TableHead>
             </TableRow>
           </TableHeader>
@@ -350,10 +351,11 @@ export function Users() {
             {rows.map((row) => (
               <TableRow key={row.id}>
                 <TableCell>
-                  <Link className="underline" to={`/p/${ref}/auth/${row.id}`}>
+                  <Link className="underline" to={`/p/${ref}/auth/users/${row.id}`}>
                     {row.email}
                   </Link>
                 </TableCell>
+                <TableCell>{row.email_verified_at ? "Verified" : "Not verified"}</TableCell>
                 <TableCell className="font-mono text-xs">{row.created_at}</TableCell>
               </TableRow>
             ))}
@@ -368,13 +370,13 @@ export function UserDetail() {
   const { ref = "", userId = "" } = useParams()
   const { role } = useOutletContext<ConsoleContext>()
   const navigate = useNavigate()
-  const [user, setUser] = useState<{ id: string; email: string; created_at: string } | null>(null)
+  const [user, setUser] = useState<{ id: string; email: string; created_at: string; email_verified_at: string | null } | null>(null)
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
   const canManage = role === "owner" || role === "admin"
 
   useEffect(() => {
-    api<{ id: string; email: string; created_at: string }>(`/console/v1/projects/${ref}/users/${userId}`)
+    api<{ id: string; email: string; created_at: string; email_verified_at: string | null }>(`/console/v1/projects/${ref}/users/${userId}`)
       .then(setUser)
       .catch((err) => setError(err.message))
   }, [ref, userId])
@@ -418,6 +420,7 @@ export function UserDetail() {
         <Card>
           <CardContent className="grid gap-1 pt-6 text-sm">
             <div>Email: {user.email}</div>
+            <div>{user.email_verified_at ? "Verified" : "Not verified"}</div>
             <div className="font-mono text-xs text-muted-foreground">{user.id}</div>
             <div className="text-muted-foreground">Created {user.created_at}</div>
           </CardContent>

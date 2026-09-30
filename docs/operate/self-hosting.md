@@ -3,7 +3,7 @@ title: Self-hosting
 description: Compose for a local cluster, and the same image on Fly.
 ---
 
-The local path is Docker Compose. The image is the same one you run elsewhere.
+Self-hosting is how you run Reactor for your own apps. Compose is the local cluster. The same image runs on Fly or, with the AWS template, on AWS. Clients do not change when you move: they still use the project host, the anon key, and `/auth/v1`, `/data/v1`, `/storage/v1`, and `/fn/v1`.
 
 ## Compose
 
@@ -24,13 +24,13 @@ docker compose -f deploy/compose/compose.yaml up -d
 
 The `keys` service writes the JWT private key and exits. Both app containers mount that volume read-only. Function workdirs are separate volumes, so a zip unpacked on one replica is not assumed to exist on the other. The blob store is the source of truth. Invoke unpacks again when the local copy is missing.
 
-`base_domain` is `apps.localhost`. A project site is `http://{ref}.apps.localhost:18000/`.
+`base_domain` is `apps.localhost`. A project site is `http://{ref}.apps.localhost:18000/`. `GET /health` on port 18000 returns 200 with an empty body when Postgres accepts a query, and 503 when it does not.
 
 First-run setup is the console or `reactor setup`. Then [create a project](/start/quickstart/).
 
 ## Fly
 
-`v2/deploy/fly/fly.toml` runs the same image in `listen` mode. `place` is `fly`, so the console shows that. PostgREST is on `127.0.0.1:3000` inside the machine. Blobs are S3-compatible storage, not the machine disk. The health check is `GET /health`.
+`deploy/fly/fly.toml` runs the same image in `listen` mode. `place` is `fly`, so the console shows that. PostgREST is on `127.0.0.1:3000` inside the machine. Blobs are S3-compatible storage, not the machine disk. The health check is `GET /health`.
 
 Secrets (database URL, operator token, storage keys, JWT) stay in the Fly secret store. They are not in the toml file that is committed.
 
@@ -38,7 +38,7 @@ Secrets (database URL, operator token, storage keys, JWT) stay in the Fly secret
 
 Add replicas when CPU is the limit. They share Postgres and the blob bucket. Nothing in the client URL changes. Add a dedicated database when one project is the limit, by setting that project's `database_url`. Callers still use the same host and the same keys.
 
-The AWS layout is the [Lambda](/operate/lambda/) page.
+The AWS layout is the [AWS](/operate/lambda/) page.
 
 ## Backup and restore
 

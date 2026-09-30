@@ -3,7 +3,7 @@ title: Todos
 description: The example app. A static site, a locked-down table, and one function.
 ---
 
-The example is `v2/examples/todos`. It is the smallest app that uses auth, data, and a function on one project host.
+The todos example is the smallest app that uses auth, data, and a function on one project host. It lives at `examples/todos`. After you link that directory and run `reactor deploy`, the site, the table, and `ping` are the same project.
 
 ## Layout
 
@@ -13,7 +13,7 @@ examples/todos/
   .reactor/service_key  # written by the CLI, not committed
   site/                 # index.html, css, and the page script
   functions/ping/       # index.ts
-  sql lives in v2/sql/project/002_todos.sql
+  sql lives in sql/project/002_todos.sql
 ```
 
 Project migrations are the server's `sql/project/` directory, not a folder inside the example. `002_todos.sql` creates `todos` with forced row-level security. A row is visible to `authenticated` only when `user_id` matches the token's `sub`. `anon` is not granted. `service` is granted and bypasses the policy.
@@ -36,7 +36,18 @@ reactor.from("todos").select("*").eq("user_id", session.user.id).order("created_
 
 Insert sends `title` and `user_id`. Update and delete filter on `id`. The policy still checks `user_id`, so a user cannot write someone else's row by changing the filter.
 
-The page also posts to `/fn/v1/ping`. That function reads stdin and `REACTOR_CALLER` and writes JSON to stdout. It includes `SITE_BANNER` only when that name is one of the function's own variables. A site variable is not copied into the function.
+The page also posts to `/fn/v1/ping`. That function reads stdin and `REACTOR_CALLER` and writes JSON to stdout:
+
+```json
+{
+  "ok": true,
+  "caller": { "sub": "…", "ref": "…", "role": "authenticated" },
+  "req": {},
+  "banner": null
+}
+```
+
+`banner` is set only when `SITE_BANNER` is one of the function's own variables. A site variable is not copied into the function. A todo row the page inserts comes back from PostgREST as `{ "id", "title", "user_id", "created_at" }` when the insert asks for the representation. Another user's token gets a PostgREST error, not that row.
 
 ## What to look at afterward
 

@@ -1,10 +1,10 @@
-# Public HTTP API for Reactor v1.26.09-beta.1.
+# Public HTTP API for Reactor v1.26.09-beta.2.
 # The console API is operator-only and is specified in docs/operate/console.md.
 # /data/v1 is PostgREST. Use PostgREST's own OpenAPI for that surface.
 openapi: 3.0.3
 info:
   title: Reactor
-  version: 1.26.09-beta.1
+  version: 1.26.09-beta.2
   license:
     name: BUSL-1.1
     url: https://mariadb.com/bsl11/
@@ -117,7 +117,7 @@ paths:
   /auth/v1/signup:
     post:
       tags: [auth]
-      summary: Create a user and a session
+      summary: Create a user. Returns a session, or verification_required when the project requires it.
       parameters:
         - $ref: "#/components/parameters/ApiKey"
       requestBody:
@@ -140,7 +140,7 @@ paths:
   /auth/v1/token:
     post:
       tags: [auth]
-      summary: Password login or refresh
+      summary: Password login, refresh, or OAuth code exchange. Password login may return verification_required, mfa_required, or enrollment_required.
       parameters:
         - $ref: "#/components/parameters/ApiKey"
       requestBody:
@@ -154,6 +154,10 @@ paths:
                   required: [refresh_token]
                   properties:
                     refresh_token: {type: string}
+                - type: object
+                  required: [code]
+                  properties:
+                    code: {type: string}
       responses:
         "200":
           description: Session
@@ -197,6 +201,102 @@ paths:
               schema:
                 $ref: "#/components/schemas/User"
         "401":
+          $ref: "#/components/responses/Error"
+  /auth/v1/verify-email:
+    post:
+      tags: [auth]
+      summary: Confirm an email with a link token or a code
+      parameters:
+        - $ref: "#/components/parameters/ApiKey"
+      responses:
+        "200":
+          description: Session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Error"
+  /auth/v1/verify-email/send:
+    post:
+      tags: [auth]
+      summary: Send a new confirmation message
+      parameters:
+        - $ref: "#/components/parameters/ApiKey"
+      responses:
+        "200":
+          description: Always ok
+  /auth/v1/factors/totp:
+    post:
+      tags: [auth]
+      summary: Finish a password login with a TOTP code
+      responses:
+        "200":
+          description: Session
+  /auth/v1/factors/passkey/verify:
+    post:
+      tags: [auth]
+      summary: Finish a password login with a passkey
+      responses:
+        "200":
+          description: Session
+        "401":
+          $ref: "#/components/responses/Error"
+  /auth/v1/factors/recovery:
+    post:
+      tags: [auth]
+      summary: Finish a password login with a backup code
+      responses:
+        "200":
+          description: Session
+  /auth/v1/authorize:
+    get:
+      tags: [auth]
+      summary: Start an OAuth authorization-code flow
+      parameters:
+        - name: provider
+          in: query
+          required: true
+          schema: {type: string}
+        - name: redirect_to
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        "302":
+          description: Redirect to the provider
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          description: Provider is disabled or unknown
+  /auth/v1/callback/{provider}:
+    get:
+      tags: [auth]
+      summary: OAuth provider callback
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "302":
+          description: Redirect to redirect_to with code or error
+  /console/v1/projects/{pref}/auth:
+    get:
+      tags: [console]
+      summary: Project auth settings
+      responses:
+        "200":
+          description: Verification and 2FA flags
+        "403":
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [console]
+      summary: Update project auth settings
+      responses:
+        "200":
+          description: Updated flags
+        "403":
           $ref: "#/components/responses/Error"
   /auth/v1/magic-link:
     post:

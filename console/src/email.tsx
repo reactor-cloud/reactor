@@ -14,6 +14,9 @@ type Settings = {
   from_address: string
   tls: string
   link_base: string
+  cluster_smtp: boolean
+  source: "project" | "cluster" | "none"
+  cluster_from: string
 }
 
 type TemplateSummary = { name: string; subject: string; reserved: boolean }
@@ -23,9 +26,17 @@ type Template = TemplateSummary & { body_text: string; body_html: string }
 const area =
   "min-h-40 w-full rounded-lg border border-input bg-transparent px-2.5 py-2 font-mono text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
 
-export function Email() {
+export function EmailSettings() {
+  return <EmailPane mode="server" />
+}
+
+export function Templates() {
+  return <EmailPane mode="templates" />
+}
+
+function EmailPane({ mode }: { mode: "server" | "templates" }) {
   const { ref = "" } = useParams()
-  const { role } = useOutletContext<ConsoleContext>()
+  const { role, platformAdmin } = useOutletContext<ConsoleContext>()
   const admin = role === "owner" || role === "admin"
   const [settings, setSettings] = useState<Settings | null>(null)
   const [password, setPassword] = useState("")
@@ -63,6 +74,20 @@ export function Email() {
     api<Template>(`/console/v1/projects/${ref}/email/templates/${name}`)
       .then(setCurrent)
       .catch((err) => setError(err instanceof Error ? err.message : "template is unavailable"))
+  }
+
+  async function setCluster(enabled: boolean) {
+    setError("")
+    setNote("")
+    try {
+      await api(`/console/v1/projects/${ref}/email/cluster`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
+      })
+      setSettings(await api<Settings>(`/console/v1/projects/${ref}/email`))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "save failed")
+    }
   }
 
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
@@ -150,11 +175,30 @@ export function Email() {
   return (
     <div className="grid max-w-3xl gap-8">
       <div>
-        <h1 className="text-2xl font-medium tracking-tight">Email</h1>
-        <p className="text-sm text-muted-foreground">SMTP for this project. Auth mail uses the magic link, recovery, and invite templates.</p>
+        <h1 className="text-2xl font-medium tracking-tight">{mode === "server" ? "Email" : "Templates"}</h1>
+        <p className="text-sm text-muted-foreground">
+          {mode === "server"
+            ? "SMTP for this project. Auth mail uses the confirm, magic link, recovery, and invite templates."
+            : "Templates can use {{email}}, {{token}}, {{link}}, and {{code}}."}
+        </p>
       </div>
-      {settings && (
+      {mode === "server" && settings && (
         <form className="grid gap-3" onSubmit={saveSettings}>
+          {platformAdmin && (
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={settings.cluster_smtp}
+                onChange={(event) => setCluster(event.target.checked)}
+              />
+              Auth email may use the cluster server
+            </label>
+          )}
+          {settings.source === "cluster" && (
+            <p className="text-sm text-muted-foreground">
+              Auth mail uses the cluster server. From {settings.cluster_from}.
+            </p>
+          )}
           <div className="grid gap-3 sm:grid-cols-3">
             <Field label="Host" value={settings.host} onChange={(host) => setSettings({ ...settings, host })} />
             <Field label="Port" value={String(settings.port)} onChange={(port) => setSettings({ ...settings, port: Number(port) })} />
@@ -187,6 +231,7 @@ export function Email() {
           <Button type="submit">Save server</Button>
         </form>
       )}
+      {mode === "server" && (
       <div className="flex items-end gap-2">
         <label className="grid flex-1 gap-2">
           <Label>Send a test</Label>
@@ -196,6 +241,8 @@ export function Email() {
           Send
         </Button>
       </div>
+      )}
+      {mode === "templates" && (
       <section className="grid gap-3">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-medium">Templates</h2>
@@ -232,6 +279,7 @@ export function Email() {
           </form>
         )}
       </section>
+      )}
       {note && <p className="text-sm text-muted-foreground">{note}</p>}
       {error && <p className="text-sm text-destructive">{error}</p>}
     </div>

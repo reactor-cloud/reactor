@@ -3,7 +3,7 @@ title: Sites
 description: Host a project's files, a small process, or a path that calls a function.
 ---
 
-A site is a hostname plus files for one project. Platform hosts are `{ref}.{base_domain}`. A custom domain is a verified row.
+A site is the hostname where a project’s files, and optionally a small process or a function, are served. Platform hosts are `{ref}.{base_domain}`. A custom domain is a verified row. `reactor deploy` uploads the `site/` directory in the linked project and makes it live only after every file succeeds.
 
 ## What a request hits
 
@@ -23,7 +23,7 @@ For a site host, Reactor looks up the path in this order:
 1. `POST /sites/v1/deployments` with the service key starts a deployment.
 2. Each file is `PUT /sites/v1/deployments/{id}/files/{path}`.
 3. `POST /sites/v1/deployments/{id}/finish` marks it ready and makes it the live set.
-4. A failed upload calls `POST /sites/v1/deployments/{id}/fail`. A deployment goes live only when every file succeeds.
+4. A failed upload calls `POST /sites/v1/deployments/{id}/fail`. A deployment goes live only when every file succeeds. Until finish, the previous live set keeps serving. A path with `..` is 403 `{ "error": "invalid path" }`.
 
 Files are objects in the blob store. The server sets a content type from the extension: html, css, js, json, svg, png, txt, or bytes.
 

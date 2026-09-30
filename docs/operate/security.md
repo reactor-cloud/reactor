@@ -3,6 +3,8 @@ title: Security
 description: Row-level security, tokens, function isolation, and what clients cannot reach.
 ---
 
+Security here is what the server enforces before your policies do. Tokens name a project and a role. Postgres row-level security decides which rows that role can see. The console, the service key, and the operator token are outside that boundary on purpose, and they do not belong in a client app.
+
 ## Data
 
 Row-level security is enabled and forced on tenant tables that ship with the server, and that is the pattern for tables you add. The default, with no policy, is deny. The service role is the only bypass.
@@ -33,7 +35,13 @@ Magic-link and recovery responses are `{ "ok": true }` whether or not the addres
 
 Challenge tokens are stored hashed. A magic link or recovery token lasts 15 minutes. An invite lasts 7 days. Repeating a send inside 60 seconds does not create another challenge.
 
-Signup, magic-link, recover, and invite accept 30 attempts a minute per project and client IP. Password login accepts 60. The response over the limit is 429 with `Retry-After: 60`. The address is the socket peer unless `http.trusted_proxy` is set, in which case the first `X-Forwarded-For` value is used.
+Signup, magic-link, recover, and invite accept 30 attempts a minute per project and client IP. Password login accepts 60. The response over the limit is 429 with `Retry-After: 60`:
+
+```json
+{ "error": "too many requests" }
+```
+
+The address is the socket peer unless `http.trusted_proxy` is set, in which case the first `X-Forwarded-For` value is used. Refresh is not counted.
 
 Browser clients may call `/auth/v1`, `/data/v1`, `/storage/v1`, and `/fn/v1` from `localhost`, `127.0.0.1`, a host under `base_domain`, or a verified domain. Other origins are not reflected in `Access-Control-Allow-Origin`.
 

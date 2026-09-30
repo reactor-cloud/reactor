@@ -284,6 +284,7 @@ async fn verify(
 ) -> Result<Json<crate::TokenOut>, ApiError> {
     let resolved = resolve_project(&state, &headers, false).await?;
     let row = consume(&state, resolved.project_id, &body.token, "magic_link").await?;
+    crate::project_auth::mark_verified(&state, row.0).await?;
     record_log(&state.pool, resolved.project_id, "auth", "verify", 200, "").await;
     issue_session(&state, resolved.project_id, &resolved.pref, row.0, row.1).await
 }
@@ -329,6 +330,7 @@ async fn complete(
         .execute(&state.pool)
         .await
         .map_err(internal)?;
+    crate::project_auth::mark_verified(state, user_id).await?;
     record_log(&state.pool, resolved.project_id, "auth", kind, 200, "").await;
     issue_session(state, resolved.project_id, &resolved.pref, user_id, email).await
 }

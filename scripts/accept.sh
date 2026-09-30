@@ -70,6 +70,10 @@ for _ in $(seq 1 30); do
       -H 'content-type: application/json' \
       -d '{}')"
     ref="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["ref"])' "$created")"
+    docker compose -p reactor-v2 -f deploy/compose/compose.yaml exec -T postgres \
+      psql -U reactor -d reactor -c \
+      "UPDATE reactor.auth_settings SET require_email_verification = false WHERE project_id = (SELECT id FROM reactor.projects WHERE ref = '${ref}')" \
+      >/dev/null
     anon="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["anon_key"])' "$created")"
     service="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["service_key"])' "$created")"
     python3 - <<'PY'

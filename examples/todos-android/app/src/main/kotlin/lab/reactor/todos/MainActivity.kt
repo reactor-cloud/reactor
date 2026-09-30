@@ -23,6 +23,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import reactor.AuthResult
 import reactor.ReactorClient
 
 class TodosState(private val client: ReactorClient, private val onPick: () -> Unit) {
@@ -37,8 +38,19 @@ class TodosState(private val client: ReactorClient, private val onPick: () -> Un
     var ping by mutableStateOf("")
     var fileNote by mutableStateOf("")
 
-    fun signUp() = run { client.auth.signUp(email, password); signedIn = true; load() }
-    fun signIn() = run { client.auth.signInWithPassword(email, password); signedIn = true; load() }
+    fun signUp() = run { finish(client.auth.signUp(email, password)) }
+    fun signIn() = run { finish(client.auth.signInWithPassword(email, password)) }
+    private suspend fun finish(result: AuthResult) {
+        when (result) {
+            is AuthResult.SignedIn -> {
+                signedIn = true
+                load()
+            }
+            is AuthResult.VerificationRequired -> error = "Check your email to verify this account."
+            is AuthResult.MfaRequired -> error = "A second factor is required."
+            is AuthResult.EnrollmentRequired -> error = "Enroll a second factor to finish sign-in."
+        }
+    }
     fun signOut() = run { client.auth.signOut(); signedIn = false; items = emptyList() }
     fun add() = run {
         val user = client.auth.getSession()!!.user

@@ -3,9 +3,9 @@ title: Storage
 description: Presigned uploads and downloads. The server does not proxy file bytes.
 ---
 
-Objects live in a filesystem or in S3. The key Reactor authorizes is `{ref}/{bucket}/{key}`. A token for project A cannot presign a key under project B.
+Storage is files for one project. Objects live in a filesystem or in S3. The key Reactor authorizes is `{ref}/{bucket}/{key}`. A token for project A cannot presign a key under project B.
 
-The server checks the project, then returns a URL. The client uploads or downloads on that URL. That keeps Lambda's body limit and the bandwidth bill off the API.
+The server checks the project, then returns a URL. The client uploads or downloads on that URL. That keeps Lambda's body limit and the bandwidth bill off the API. The JavaScript client’s `storage.from(bucket).upload` does this presign and PUT for you.
 
 ## Presign
 
@@ -21,7 +21,13 @@ The server checks the project, then returns a URL. The client uploads or downloa
 { "url": "https://...", "key": "<ref>/files/notes/hello.txt" }
 ```
 
-The URL is valid for 300 seconds. `PUT` the bytes to `url` with a `Content-Type`. `GET` the URL to download. A bad signature or an expired URL is rejected.
+The URL is valid for 300 seconds. `PUT` the bytes to `url` with a `Content-Type`. `GET` the URL to download. A bad signature is 403:
+
+```json
+{ "error": "bad signature" }
+```
+
+A key that escapes the project is also 403, `{ "error": "invalid object key" }`. An expired URL is rejected the same way.
 
 Keys that contain `..` or escape the project prefix are refused.
 

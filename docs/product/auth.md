@@ -1,11 +1,11 @@
 ---
 title: Auth
-description: Project users, sessions, magic links, recovery, and invites.
+description: Project users, email verification, second factors, and OAuth.
 ---
 
-Auth is per project. Routes live at `/auth/v1`. A request must resolve a project from the host or from a bearer token. Signup and password login accept the anon key.
+Auth is how a project gets users. It is not the console login. A person who signs up here can read and write rows their policies allow. They cannot open `/console`. Routes live at `/auth/v1`. A request must resolve a project from the host or from a bearer token. Signup and password login accept the anon key.
 
-Project users are not console operators. See [Concepts](/start/concepts/).
+The JavaScript client’s `auth.signUp` and `auth.signInWithPassword` call these routes and return the session below. See [Concepts](/start/concepts/) for how that token differs from an operator token.
 
 ## Password
 
@@ -17,9 +17,25 @@ Project users are not console operators. See [Concepts](/start/concepts/).
 
 Password shorter than 8 characters is 400. A duplicate email is 409. Email is stored lowercased and trimmed.
 
-`POST /auth/v1/token` with email and password signs in. Unknown email or a bad password is 401, with the same error text.
+`POST /auth/v1/token` with email and password signs in. Unknown email or a bad password is 401, with the same error text, so the response does not reveal which addresses exist:
 
-Both return:
+```json
+{ "error": "invalid credentials" }
+```
+
+New projects require email verification. Signup then returns 200 and no tokens:
+
+```json
+{ "verification_required": true, "user": { "id": "...", "email": "ada@example.com" } }
+```
+
+The message contains a link and a 6-digit code. `POST /auth/v1/verify-email` with `{ "token" }` or `{ "email", "code" }` returns a session and sets `email_verified_at`. Either value works once. Five wrong codes burn the challenge. `POST /auth/v1/verify-email/send` with `{ "email" }` replaces the previous challenge. A second send inside 60 seconds does not send mail. The response is always `{ "ok": true }`.
+
+Password login of an unverified user returns the same `verification_required` body and does not send another message. Turn verification off in the console and signup and password login return a session with no confirm mail.
+
+When 2FA is required, a verified password login with no factor returns `{ "enrollment_required": true, "enroll_token": "...", "factors": [] }`. That token can only enroll. Finish enroll returns eight backup codes once and a session. When a factor is already enrolled the body is `{ "mfa_required": true, "mfa_token": "...", "factors": ["totp"] }`. `POST /auth/v1/factors/totp`, `/auth/v1/factors/passkey/verify`, and `/auth/v1/factors/recovery` return a session. Five failures burn the challenge. With 2FA off, password login returns a session even if factors exist. OAuth is not challenged. Signup with verification off returns a session even when 2FA is on.
+
+A session, when one is issued:
 
 ```json
 {
@@ -35,28 +51,53 @@ The access token is an Ed25519 JWT. It expires in 15 minutes. Claims include the
 
 `POST /auth/v1/logout` with `{ "refresh_token": "..." }` deletes that session and returns 204.
 
-`GET /auth/v1/user` with the user access token returns `{ "id", "email" }`. An anon or service token is 401.
+`GET /auth/v1/user` with the user access token returns `{ "id", "email", "email_verified_at" }`. An anon or service token is 401.
 
 ## Email flows
 
-Magic links, recovery, and invites send mail through the project's SMTP settings. Configure those in the console under the project email settings. Templates are `magic_link`, `recovery`, and `invite`. You can replace a template; reset restores the built-in one.
+Magic links, recovery, invites, and email confirmation send mail through SMTP. The project server wins when its host is set. Otherwise, if a platform admin has allowed the project to use the cluster server and that host is set, mail uses the cluster server. If neither host is set, there is no mail. The From address follows the server that sends. The link base stays on the project even when the cluster server sends.
 
-`POST /auth/v1/magic-link` with `{ "email" }` and the anon key. The response is always `{ "ok": true }`. A new email creates a user. The link token lasts 15 minutes. A second request for the same email within 60 seconds does not send another message.
+Each server stores host, port (default 587), username, password, From address, and TLS: `starttls`, `tls`, or `none`. The password is write-only. A later read shows `password_set` and never the secret. Configure the project under Auth → Email. A platform admin stores the cluster server on the Cluster page and turns `cluster_smtp` on per project. Templates are `confirm_email`, `magic_link`, `recovery`, and `invite`. `confirm_email` includes `{{code}}` and `{{link}}`. You can replace a template; reset restores the built-in one.
 
-`POST /auth/v1/verify` with `{ "token" }` consumes a magic-link token and returns a session.
+`POST /auth/v1/magic-link` with `{ "email" }` and the anon key. The response is always:
+
+```json
+{ "ok": true }
+```
+
+A new email creates a user. The link token lasts 15 minutes. A second request for the same email within 60 seconds does not send another message.
+
+`POST /auth/v1/verify` with `{ "token" }` consumes a magic-link token, sets `email_verified_at`, and returns a session.
 
 `POST /auth/v1/recover` with `{ "email" }` is also always `{ "ok": true }`, including when the email is unknown. That avoids confirming which addresses exist.
 
-`POST /auth/v1/recover/complete` with `{ "token", "password" }` sets the password and returns a session.
+`POST /auth/v1/recover/complete` with `{ "token", "password" }` sets the password, marks the email verified, and returns a session.
 
 `POST /auth/v1/invite` requires the service key and `{ "email" }`. If email is not configured the response is 503. If the message cannot be sent it is 502 and the user row is removed. An existing email is 409. The invite lasts 7 days.
 
-`POST /auth/v1/invite/accept` with `{ "token", "password" }` sets the password and returns a session.
+`POST /auth/v1/invite/accept` with `{ "token", "password" }` sets the password, marks the email verified, and returns a session.
 
-## What is not here
+If SMTP is missing, a signup that requires verification is 503 and the new user row is removed. A send failure is 502 and the row is removed.
 
-OAuth and external identity providers are not implemented. The JavaScript, Swift, and Kotlin clients throw if you call `signInWithOAuth`. A later provider has to return the same identity: project, user id, role, and claims. Auth, data, storage, functions, and sites do not learn which issuer it was.
+## Second factor
 
-Project-user MFA is not a route on `/auth/v1`. Console MFA applies to operators only.
+Passkey is a second factor, not a passwordless login. Enroll while signed in with the user access token, or with the `enroll_token` from password login:
+
+- `POST /auth/v1/factors/totp/start` then `POST /auth/v1/factors/totp/confirm` with `{ "code" }`
+- `POST /auth/v1/factors/passkey/register/options` then `POST /auth/v1/factors/passkey/register`
+- `POST /auth/v1/factors/finish` after at least one factor is enrolled
+- `POST /auth/v1/factors/recovery/regenerate` with the user access token
+
+A password challenge uses `POST /auth/v1/factors/totp` with `{ "mfa_token", "code" }`, `POST /auth/v1/factors/passkey/options` then `/auth/v1/factors/passkey/verify`, or `POST /auth/v1/factors/recovery` with a backup code.
+
+## OAuth
+
+The project owner pastes credentials for Google, Microsoft, Apple, GitHub, Facebook, Discord, X, LinkedIn, Slack, or GitLab. Microsoft needs `extra.tenant` (use `common` for any work or personal account). Apple needs `extra.team_id` and a client secret the server signs as a JWT. Each provider has a redirect allowlist. `GET /auth/v1/authorize?provider=&redirect_to=` checks that list, stores PKCE for 10 minutes, and redirects to the provider. The callback is `{origin}/auth/v1/callback/{provider}`. Register that URL with the provider. Apple posts the callback; the others use GET.
+
+A known provider subject signs that user in. A verified email that matches a user links the identity. An unverified email does not link and does not create a user; the browser is sent to `redirect_to?error=email_not_verified`. A new verified email creates a user with no password. The browser is then sent to `redirect_to?code=`. `POST /auth/v1/token` with `{ "code" }` returns a session. Reusing the code is 401. A redirect that is not on the allowlist is 400. A disabled provider is 404.
+
+Every finished path returns the same session. Data and storage do not learn the method.
+
+Console operator login is separate and is not these routes.
 
 Signing keys live on the server (`REACTOR_AUTH__JWT_DIR` or a PEM file). Clients never see the private key. PostgREST verifies the same public key.

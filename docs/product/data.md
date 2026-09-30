@@ -3,7 +3,9 @@ title: Data
 description: PostgREST on /data/v1, with row-level security as the enforcement boundary.
 ---
 
-`/data/v1` is a reverse proxy to PostgREST. The prefix is stripped before the request is forwarded, so clients keep one origin and PostgREST keeps its own paths. OpenAPI for your tables is PostgREST's. Reactor does not publish a second description of them.
+Data is your Postgres schema, reached over HTTP. `/data/v1` is a reverse proxy to PostgREST. The prefix is stripped before the request is forwarded, so clients keep one origin and PostgREST keeps its own paths. Row-level security is the boundary: a user token sees only the rows its policies allow, and the service key is the bypass used by deploys and trusted server code.
+
+OpenAPI for your tables is PostgREST's. Reactor does not publish a second description of them. The JavaScript client’s `from()` and `rpc()` are the PostgREST query builder pointed at this prefix.
 
 ## How a request is scoped
 
@@ -29,6 +31,14 @@ Prefer: return=representation
 
 { "title": "Ship the site", "user_id": "<user uuid>" }
 ```
+
+A select returns a JSON array. With `Prefer: return=representation`, an insert returns the stored rows:
+
+```json
+[{ "id": "…", "title": "Ship the site", "user_id": "6b1c1a4e-2f0a-4d3b-9c11-0a9e8d7c6b5a" }]
+```
+
+A policy denial is a PostgREST error object, not an empty array. The JavaScript client surfaces that as `{ data: null, error }`.
 
 `PATCH` updates. `DELETE` removes. A write that must be one transaction is a SQL function in the project schema, exposed as RPC:
 

@@ -1,16 +1,22 @@
-import { BrowserRouter, Route, Routes } from "react-router-dom"
+import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router-dom"
 import { Data } from "@/data"
 import { Logs } from "@/logs"
 import { Cluster } from "@/cluster"
 import { Operators } from "@/operators"
 import { Overview } from "@/overview"
 import { Functions } from "@/functions"
-import { Email } from "@/email"
+import { Auth, MfaSettings, Providers } from "@/auth"
+import { EmailSettings, Templates } from "@/email"
 import { Home, Keys, Login, Setup, Team, UserDetail, Users } from "@/pages"
 import { Settings } from "@/settings"
 import { Sites } from "@/sites"
 import { Shell } from "@/shell"
 import { Storage } from "@/storage"
+
+function EmailRedirect() {
+  const { ref = "" } = useParams()
+  return <Navigate to={`/p/${ref}/auth/email`} replace />
+}
 
 export default function App() {
   return (
@@ -24,9 +30,15 @@ export default function App() {
           <Route path="users" element={<Operators />} />
           <Route path="p/:ref" element={<Overview />} />
           <Route path="p/:ref/keys" element={<Keys />} />
-          <Route path="p/:ref/auth" element={<Users />} />
-          <Route path="p/:ref/auth/:userId" element={<UserDetail />} />
-          <Route path="p/:ref/email" element={<Email />} />
+          <Route path="p/:ref/auth" element={<Auth />}>
+            <Route index element={<Users />} />
+            <Route path="users/:userId" element={<UserDetail />} />
+            <Route path="providers" element={<Providers />} />
+            <Route path="mfa" element={<MfaSettings />} />
+            <Route path="email" element={<EmailSettings />} />
+            <Route path="templates" element={<Templates />} />
+          </Route>
+          <Route path="p/:ref/email" element={<EmailRedirect />} />
           <Route path="p/:ref/data" element={<Data />} />
           <Route path="p/:ref/data/:table" element={<Data />} />
           <Route path="p/:ref/storage" element={<Storage />} />

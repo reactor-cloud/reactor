@@ -106,6 +106,8 @@ services:
       - functions-a:/data/functions
       - ../../sql:/app/sql
       - ../../.data/dns:/dns
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     container_name: reactor-v2-app
 
   reactor-2:
@@ -123,6 +125,8 @@ services:
       - functions-b:/data/functions
       - ../../sql:/app/sql
       - ../../.data/dns:/dns
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     container_name: reactor-v2-app-2
 
 volumes:

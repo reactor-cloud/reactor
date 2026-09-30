@@ -352,6 +352,11 @@ async fn gate_email() {
 }
 
 #[tokio::test]
+async fn gate_cluster_email() {
+    run_gate(cluster_email_gate()).await;
+}
+
+#[tokio::test]
 async fn gate_console() {
     run_gate(console_gate()).await;
 }
@@ -398,7 +403,35 @@ async fn create_project(http: &Http, port: u16) -> anyhow::Result<Keys> {
     })
 }
 
+async fn allow_password(http: &Http, project: &Keys) -> anyhow::Result<()> {
+    let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+    let required: Option<bool> = sqlx::query_scalar(
+        "SELECT s.require_email_verification FROM reactor.auth_settings s \
+         JOIN reactor.projects p ON p.id = s.project_id WHERE p.ref = $1",
+    )
+    .bind(&project.pref)
+    .fetch_optional(&pool)
+    .await?;
+    if required == Some(false) {
+        return Ok(());
+    }
+    let token = console_token(&pool, http, project).await?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            &format!("/console/v1/projects/{}/auth", project.pref),
+            Some(&token),
+            Some(json!({"require_email_verification": false, "require_mfa": false})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    Ok(())
+}
+
 async fn signup(http: &Http, project: &Keys) -> anyhow::Result<Session> {
+    allow_password(http, project).await?;
     let email = format!("{}@example.com", &project.pref[..8]);
     let (status, body) = http
         .call(
@@ -1360,6 +1393,22 @@ async fn replica_gate(http: &Http, project: &Keys) -> anyhow::Result<()> {
 
 async fn console_token(pool: &PgPool, http: &Http, project: &Keys) -> anyhow::Result<String> {
     let email = format!("ops-{}@example.com", &project.pref[..8]);
+    if let Some(id) =
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM reactor.operators WHERE email = $1")
+            .bind(&email)
+            .fetch_optional(pool)
+            .await?
+    {
+        let code = format!("accept-{id}-{}", Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO reactor.operator_recovery_codes (operator_id, code_hash) VALUES ($1, $2)",
+        )
+        .bind(id)
+        .bind(reactor_auth::token_hash(&code))
+        .execute(pool)
+        .await?;
+        return console_login(http, &email, &code).await;
+    }
     let hash = reactor_auth::hash_password("scripted-pass")?;
     let id = Uuid::new_v4();
     sqlx::query(
@@ -1398,6 +1447,10 @@ async fn console_token(pool: &PgPool, http: &Http, project: &Keys) -> anyhow::Re
     .bind(reactor_auth::token_hash(&code))
     .execute(pool)
     .await?;
+    console_login(http, &email, &code).await
+}
+
+async fn console_login(http: &Http, email: &str, code: &str) -> anyhow::Result<String> {
     let (status, body) = http
         .call(
             18000,
@@ -1539,6 +1592,438 @@ async fn mail_token(to: &str) -> anyhow::Result<String> {
     anyhow::bail!("no mail for {to}")
 }
 
+struct SavedCluster {
+    present: bool,
+    host: String,
+    port: i32,
+    username: String,
+    password_enc: String,
+    from_address: String,
+    tls: String,
+}
+
+async fn read_cluster(pool: &PgPool) -> anyhow::Result<SavedCluster> {
+    let row: Option<(String, i32, String, String, String, String)> = sqlx::query_as(
+        "SELECT host, port, username, password_enc, from_address, tls FROM reactor.cluster_email WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(match row {
+        Some((host, port, username, password_enc, from_address, tls)) => SavedCluster {
+            present: true,
+            host,
+            port,
+            username,
+            password_enc,
+            from_address,
+            tls,
+        },
+        None => SavedCluster {
+            present: false,
+            host: String::new(),
+            port: 587,
+            username: String::new(),
+            password_enc: String::new(),
+            from_address: String::new(),
+            tls: "starttls".into(),
+        },
+    })
+}
+
+async fn write_cluster(pool: &PgPool, saved: &SavedCluster) -> anyhow::Result<()> {
+    if !saved.present {
+        sqlx::query("DELETE FROM reactor.cluster_email WHERE id = 1")
+            .execute(pool)
+            .await?;
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO reactor.cluster_email (id, host, port, username, password_enc, from_address, tls) \
+         VALUES (1, $1, $2, $3, $4, $5, $6) \
+         ON CONFLICT (id) DO UPDATE SET host = EXCLUDED.host, port = EXCLUDED.port, username = EXCLUDED.username, \
+         password_enc = EXCLUDED.password_enc, from_address = EXCLUDED.from_address, tls = EXCLUDED.tls",
+    )
+    .bind(&saved.host)
+    .bind(saved.port)
+    .bind(&saved.username)
+    .bind(&saved.password_enc)
+    .bind(&saved.from_address)
+    .bind(&saved.tls)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn platform_token(pool: &PgPool, http: &Http, project: &Keys) -> anyhow::Result<String> {
+    let email = format!("admin-{}@example.com", &project.pref[..8]);
+    if let Some(id) =
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM reactor.operators WHERE email = $1")
+            .bind(&email)
+            .fetch_optional(pool)
+            .await?
+    {
+        let code = format!("accept-{id}-{}", Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO reactor.operator_recovery_codes (operator_id, code_hash) VALUES ($1, $2)",
+        )
+        .bind(id)
+        .bind(reactor_auth::token_hash(&code))
+        .execute(pool)
+        .await?;
+        return console_login(http, &email, &code).await;
+    }
+    let hash = reactor_auth::hash_password("scripted-pass")?;
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO reactor.operators (id, email, name, password_hash, platform_admin) VALUES ($1, $2, 'Accept', $3, true)",
+    )
+    .bind(id)
+    .bind(&email)
+    .bind(&hash)
+    .execute(pool)
+    .await?;
+    sqlx::query("INSERT INTO reactor.operator_factors (operator_id, kind, secret) VALUES ($1, 'totp', 'test')")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    sqlx::query("INSERT INTO reactor.operator_factors (operator_id, kind, credential) VALUES ($1, 'passkey', $2)")
+        .bind(id)
+        .bind(json!({}))
+        .execute(pool)
+        .await?;
+    let code = format!("accept-{id}");
+    sqlx::query(
+        "INSERT INTO reactor.operator_recovery_codes (operator_id, code_hash) VALUES ($1, $2)",
+    )
+    .bind(id)
+    .bind(reactor_auth::token_hash(&code))
+    .execute(pool)
+    .await?;
+    console_login(http, &email, &code).await
+}
+
+fn status_is(status: u16, want: u16, body: &str) -> anyhow::Result<()> {
+    if status != want {
+        anyhow::bail!("status {status}, want {want}: {body}");
+    }
+    Ok(())
+}
+
+async fn latest_mail(to: &str) -> anyhow::Result<(String, String)> {
+    for _ in 0..40 {
+        let res =
+            reqwest::get(format!("http://127.0.0.1:8025/api/v1/search?query=to:{to}")).await?;
+        let body: Value = res.json().await?;
+        let Some(messages) = body["messages"].as_array() else {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            continue;
+        };
+        let Some(message) = messages.first() else {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            continue;
+        };
+        let id = message["ID"]
+            .as_str()
+            .or_else(|| message["id"].as_str())
+            .unwrap_or("");
+        if id.is_empty() {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            continue;
+        }
+        let detail: Value = reqwest::get(format!("http://127.0.0.1:8025/api/v1/message/{id}"))
+            .await?
+            .json()
+            .await?;
+        let from = detail
+            .pointer("/From/Address")
+            .or_else(|| detail.pointer("/from/Address"))
+            .or_else(|| detail.pointer("/From/address"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        let text = detail["Text"]
+            .as_str()
+            .or_else(|| detail["text"].as_str())
+            .unwrap_or("");
+        let html = detail["HTML"]
+            .as_str()
+            .or_else(|| detail["html"].as_str())
+            .unwrap_or("");
+        if !from.is_empty() {
+            return Ok((from, format!("{text}\n{html}")));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    anyhow::bail!("no mail for {to}")
+}
+
+async fn cluster_email_gate() -> anyhow::Result<()> {
+    let http = live().await?;
+    let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+    let saved = read_cluster(&pool).await?;
+    let result = cluster_email_steps(&http, &pool).await;
+    write_cluster(&pool, &saved).await?;
+    result
+}
+
+async fn cluster_email_steps(http: &Http, pool: &PgPool) -> anyhow::Result<()> {
+    let project = create_project(http, 18000).await?;
+    let owner = console_token(pool, http, &project).await?;
+    let invitee = format!("invite-c-{}@example.com", &project.pref[..8]);
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&project.pref),
+            "POST",
+            "/auth/v1/invite",
+            Some(&project.service),
+            Some(json!({"email": invitee})),
+        )
+        .await?;
+    status_is(status, 503, &body)?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            &format!("/console/v1/projects/{}/email/test", project.pref),
+            Some(&owner),
+            Some(json!({"to": invitee})),
+        )
+        .await?;
+    status_is(status, 503, &body)?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            "/console/v1/cluster/email",
+            Some(&owner),
+            Some(json!({
+                "host": "mailpit",
+                "port": 1025,
+                "username": "",
+                "password": "cluster-secret",
+                "from_address": "cluster@example.com",
+                "tls": "none"
+            })),
+        )
+        .await?;
+    status_is(status, 403, &body)?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            &format!("/console/v1/projects/{}/email/cluster", project.pref),
+            Some(&owner),
+            Some(json!({"enabled": true})),
+        )
+        .await?;
+    status_is(status, 403, &body)?;
+    let admin = platform_token(pool, http, &project).await?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            "/console/v1/cluster/email",
+            Some(&admin),
+            Some(json!({
+                "host": "mailpit",
+                "port": 1025,
+                "username": "",
+                "password": "cluster-secret",
+                "from_address": "cluster@example.com",
+                "tls": "none"
+            })),
+        )
+        .await?;
+    status_is(status, 200, &body)?;
+    if body.contains("password_enc") || body.contains("cluster-secret") {
+        anyhow::bail!("cluster mail response exposed the password: {body}");
+    }
+    let saved_mail: Value = serde_json::from_str(&body)?;
+    if saved_mail["password_set"] != true {
+        anyhow::bail!("password_set: {body}");
+    }
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "GET",
+            "/console/v1/cluster/email",
+            Some(&admin),
+            None,
+        )
+        .await?;
+    status_is(status, 200, &body)?;
+    if body.contains("password_enc") || body.contains("cluster-secret") {
+        anyhow::bail!("cluster mail GET exposed the password: {body}");
+    }
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&project.pref),
+            "POST",
+            "/auth/v1/invite",
+            Some(&project.service),
+            Some(json!({"email": format!("invite-off-{}@example.com", &project.pref[..8])})),
+        )
+        .await?;
+    status_is(status, 503, &body)?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            &format!("/console/v1/projects/{}/email/cluster", project.pref),
+            Some(&admin),
+            Some(json!({"enabled": true})),
+        )
+        .await?;
+    status_is(status, 200, &body)?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            &format!("/console/v1/projects/{}/email", project.pref),
+            Some(&owner),
+            Some(json!({
+                "host": "",
+                "port": 587,
+                "username": "",
+                "from_address": "",
+                "tls": "starttls",
+                "link_base": "http://127.0.0.1/cb"
+            })),
+        )
+        .await?;
+    status_is(status, 200, &body)?;
+    let listed: Value = serde_json::from_str(&body)?;
+    if listed["source"] != "cluster" || listed["cluster_from"] != "cluster@example.com" {
+        anyhow::bail!("expected cluster source: {body}");
+    }
+    if body.contains("password_enc") || body.contains("mailpit") {
+        anyhow::bail!("project mail exposed the cluster server: {body}");
+    }
+    let magic = format!("magic-c-{}@example.com", &project.pref[..8]);
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&project.pref),
+            "POST",
+            "/auth/v1/magic-link",
+            Some(&project.anon),
+            Some(json!({"email": magic})),
+        )
+        .await?;
+    status_is(status, 200, &body)?;
+    let (from, text) = latest_mail(&magic).await?;
+    if from != "cluster@example.com" {
+        anyhow::bail!("cluster from was {from}");
+    }
+    if !text.contains("http://127.0.0.1/cb") {
+        anyhow::bail!("link base missing: {text}");
+    }
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            &format!("/console/v1/projects/{}/email", project.pref),
+            Some(&owner),
+            Some(json!({
+                "host": "mailpit",
+                "port": 1025,
+                "username": "",
+                "from_address": "project@example.com",
+                "tls": "none",
+                "link_base": "http://127.0.0.1/cb"
+            })),
+        )
+        .await?;
+    status_is(status, 200, &body)?;
+    let own: Value = serde_json::from_str(&body)?;
+    if own["source"] != "project" {
+        anyhow::bail!("expected project source: {body}");
+    }
+    let owned = format!("own-{}@example.com", &project.pref[..8]);
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&project.pref),
+            "POST",
+            "/auth/v1/magic-link",
+            Some(&project.anon),
+            Some(json!({"email": owned})),
+        )
+        .await?;
+    status_is(status, 200, &body)?;
+    let (from, _) = latest_mail(&owned).await?;
+    if from != "project@example.com" {
+        anyhow::bail!("project from was {from}");
+    }
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            &format!("/console/v1/projects/{}/email", project.pref),
+            Some(&owner),
+            Some(json!({
+                "host": "",
+                "port": 587,
+                "username": "",
+                "from_address": "",
+                "tls": "starttls",
+                "link_base": "http://127.0.0.1/cb"
+            })),
+        )
+        .await?;
+    status_is(status, 200, &body)?;
+    let again = format!("again-{}@example.com", &project.pref[..8]);
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&project.pref),
+            "POST",
+            "/auth/v1/magic-link",
+            Some(&project.anon),
+            Some(json!({"email": again})),
+        )
+        .await?;
+    status_is(status, 200, &body)?;
+    let (from, _) = latest_mail(&again).await?;
+    if from != "cluster@example.com" {
+        anyhow::bail!("fallback from was {from}");
+    }
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            &format!("/console/v1/projects/{}/email/cluster", project.pref),
+            Some(&admin),
+            Some(json!({"enabled": false})),
+        )
+        .await?;
+    status_is(status, 200, &body)?;
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&project.pref),
+            "POST",
+            "/auth/v1/invite",
+            Some(&project.service),
+            Some(json!({"email": format!("invite-end-{}@example.com", &project.pref[..8])})),
+        )
+        .await?;
+    status_is(status, 503, &body)?;
+    Ok(())
+}
+
 async fn email_gate() -> anyhow::Result<()> {
     let http = live().await?;
     let project = create_project(&http, 18000).await?;
@@ -1616,6 +2101,20 @@ async fn email_gate() -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(status, 200, "{body}");
+    let session: Value = serde_json::from_str(&body)?;
+    let (status, user) = http
+        .call(
+            18000,
+            Some(&project.pref),
+            "GET",
+            "/auth/v1/user",
+            Some(session["access_token"].as_str().unwrap()),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{user}");
+    let user: Value = serde_json::from_str(&user)?;
+    assert!(user["email_verified_at"].as_str().is_some(), "{user}");
     let (status, _) = http
         .call(
             18000,
@@ -1690,6 +2189,7 @@ async fn email_gate() -> anyhow::Result<()> {
 }
 
 async fn signup_as(http: &Http, project: &Keys, email: &str) -> anyhow::Result<Session> {
+    allow_password(http, project).await?;
     let (status, body) = http
         .call(
             18000,
@@ -1756,6 +2256,7 @@ async fn cors_gate() -> anyhow::Result<()> {
 async fn rate_limit_gate() -> anyhow::Result<()> {
     let http = live().await?;
     let project = create_project(&http, 18000).await?;
+    allow_password(&http, &project).await?;
     let mut limited = false;
     for n in 0..31 {
         let (status, body) = http
@@ -2365,4 +2866,645 @@ async fn app_json(
         serde_json::from_slice(&bytes).unwrap_or(json!({"raw": String::from_utf8_lossy(&bytes)}))
     };
     Ok((status, value))
+}
+
+fn code_from(text: &str) -> Option<String> {
+    let rest = text.split("Code: ").nth(1)?;
+    let code: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if code.len() == 6 {
+        Some(code)
+    } else {
+        None
+    }
+}
+
+async fn configure_mail(http: &Http, project: &Keys, token: &str) -> anyhow::Result<()> {
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            &format!("/console/v1/projects/{}/email", project.pref),
+            Some(token),
+            Some(json!({
+                "host": "mailpit",
+                "port": 1025,
+                "username": "",
+                "password": "",
+                "from_address": "reactor@example.com",
+                "tls": "none",
+                "link_base": "http://127.0.0.1/cb"
+            })),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn gate_confirm_email() {
+    run_gate(async {
+        let http = live().await?;
+        let project = create_project(&http, 18000).await?;
+        let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+        let token = console_token(&pool, &http, &project).await?;
+        let (status, body) = http
+            .call(18000, None, "GET", &format!("/console/v1/projects/{}/auth", project.pref), Some(&token), None)
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let settings: Value = serde_json::from_str(&body)?;
+        assert_eq!(settings["require_email_verification"], true);
+        let developer = format!("dev-{}@example.com", &project.pref[..8]);
+        let dev_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO reactor.operators (id, email, name, password_hash, platform_admin) VALUES ($1, $2, 'Dev', $3, false)",
+        )
+        .bind(dev_id)
+        .bind(&developer)
+        .bind(reactor_auth::hash_password("scripted-pass")?)
+        .execute(&pool)
+        .await?;
+        let project_id: Uuid = sqlx::query_scalar("SELECT id FROM reactor.projects WHERE ref = $1")
+            .bind(&project.pref)
+            .fetch_one(&pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO reactor.memberships (operator_id, project_id, role) VALUES ($1, $2, 'developer')",
+        )
+        .bind(dev_id)
+        .bind(project_id)
+        .execute(&pool)
+        .await?;
+        sqlx::query("INSERT INTO reactor.operator_factors (operator_id, kind, secret) VALUES ($1, 'totp', 'test')")
+            .bind(dev_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO reactor.operator_factors (operator_id, kind, credential) VALUES ($1, 'passkey', $2)")
+            .bind(dev_id)
+            .bind(json!({}))
+            .execute(&pool)
+            .await?;
+        let recovery = format!("accept-{dev_id}");
+        sqlx::query("INSERT INTO reactor.operator_recovery_codes (operator_id, code_hash) VALUES ($1, $2)")
+            .bind(dev_id)
+            .bind(reactor_auth::token_hash(&recovery))
+            .execute(&pool)
+            .await?;
+        let (status, body) = http
+            .call(18000, None, "POST", "/console/v1/login", None, Some(json!({"email": developer, "password": "scripted-pass"})))
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let login: Value = serde_json::from_str(&body)?;
+        let dev_token = if let Some(access) = login["access_token"].as_str() {
+            access.to_string()
+        } else {
+            let (status, session) = http
+                .call(
+                    18000,
+                    None,
+                    "POST",
+                    "/console/v1/mfa/recovery",
+                    Some(login["mfa_token"].as_str().context("developer mfa")?),
+                    Some(json!({"code": recovery})),
+                )
+                .await?;
+            assert_eq!(status, 200, "{session}");
+            let session: Value = serde_json::from_str(&session)?;
+            session["access_token"].as_str().context("developer token")?.to_string()
+        };
+        let (status, body) = http
+            .call(
+                18000,
+                None,
+                "PUT",
+                &format!("/console/v1/projects/{}/auth", project.pref),
+                Some(&dev_token),
+                Some(json!({"require_email_verification": false, "require_mfa": false})),
+            )
+            .await?;
+        assert_eq!(status, 403, "developer changed auth settings: {body}");
+        let bare = format!("bare-{}@example.com", &project.pref[..8]);
+        let (status, body) = http
+            .call(18000, Some(&project.pref), "POST", "/auth/v1/signup", None, Some(json!({"email": bare, "password": "password123"})))
+            .await?;
+        assert_eq!(status, 503, "signup without smtp: {body}");
+        configure_mail(&http, &project, &token).await?;
+        let (status, body) = http
+            .call(18000, Some(&project.pref), "POST", "/auth/v1/signup", None, Some(json!({"email": bare, "password": "password123"})))
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let pending: Value = serde_json::from_str(&body)?;
+        assert_eq!(pending["verification_required"], true);
+        assert!(pending.get("access_token").is_none());
+        let mailed = mail_bodies(&bare).await?;
+        let link = token_from(mailed.last().context("no confirm mail")?).context("token")?;
+        let code = code_from(mailed.last().unwrap()).context("no code")?;
+        let (status, _) = http
+            .call(18000, Some(&project.pref), "POST", "/auth/v1/verify-email/send", None, Some(json!({"email": bare})))
+            .await?;
+        assert_eq!(status, 200);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(mail_bodies(&bare).await?.len(), 1, "resend inside 60 seconds");
+        let (status, body) = http
+            .call(18000, Some(&project.pref), "POST", "/auth/v1/token", None, Some(json!({"email": bare, "password": "password123"})))
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let still: Value = serde_json::from_str(&body)?;
+        assert_eq!(still["verification_required"], true);
+        assert_eq!(mail_bodies(&bare).await?.len(), 1, "login sent another mail");
+        let (status, body) = http
+            .call(18000, Some(&project.pref), "POST", "/auth/v1/verify-email", None, Some(json!({"token": link})))
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let (status, _) = http
+            .call(18000, Some(&project.pref), "POST", "/auth/v1/verify-email", None, Some(json!({"email": bare, "code": code})))
+            .await?;
+        assert_eq!(status, 401);
+        let coded = format!("code-{}@example.com", &project.pref[..8]);
+        let (status, _) = http
+            .call(18000, Some(&project.pref), "POST", "/auth/v1/signup", None, Some(json!({"email": coded, "password": "password123"})))
+            .await?;
+        assert_eq!(status, 200);
+        let pasted = code_from(mail_bodies(&coded).await?.last().context("no code mail")?).context("code")?;
+        for _ in 0..5 {
+            let (status, _) = http
+                .call(18000, Some(&project.pref), "POST", "/auth/v1/verify-email", None, Some(json!({"email": coded, "code": "000000"})))
+                .await?;
+            assert_eq!(status, 401);
+        }
+        let (status, _) = http
+            .call(18000, Some(&project.pref), "POST", "/auth/v1/verify-email", None, Some(json!({"email": coded, "code": pasted})))
+            .await?;
+        assert_eq!(status, 401, "burned code still worked");
+        Ok(())
+    })
+    .await;
+}
+
+fn current_totp(secret: &str) -> anyhow::Result<String> {
+    let bytes = totp_rs::Secret::Encoded(secret.to_string()).to_bytes()?;
+    let totp = totp_rs::TOTP::new(
+        totp_rs::Algorithm::SHA1,
+        6,
+        1,
+        30,
+        bytes,
+        Some("Reactor".into()),
+        "user".into(),
+    )?;
+    Ok(totp.generate_current()?)
+}
+
+#[tokio::test]
+async fn gate_project_factors() {
+    run_gate(async {
+        let http = live().await?;
+        let project = create_project(&http, 18000).await?;
+        let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+        let token = console_token(&pool, &http, &project).await?;
+        let (status, body) = http
+            .call(
+                18000,
+                None,
+                "PUT",
+                &format!("/console/v1/projects/{}/auth", project.pref),
+                Some(&token),
+                Some(json!({"require_email_verification": false, "require_mfa": true})),
+            )
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let email = format!("mfa-{}@example.com", &project.pref[..8]);
+        let (status, body) = http
+            .call(
+                18000,
+                Some(&project.pref),
+                "POST",
+                "/auth/v1/signup",
+                None,
+                Some(json!({"email": email, "password": "password123"})),
+            )
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = http
+            .call(
+                18000,
+                Some(&project.pref),
+                "POST",
+                "/auth/v1/token",
+                None,
+                Some(json!({"email": email, "password": "password123"})),
+            )
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let challenge: Value = serde_json::from_str(&body)?;
+        assert_eq!(challenge["enrollment_required"], true);
+        let enroll = challenge["enroll_token"].as_str().context("enroll token")?;
+        let (status, body) = http
+            .call(
+                18000,
+                Some(&project.pref),
+                "POST",
+                "/auth/v1/factors/totp/start",
+                Some(enroll),
+                None,
+            )
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let start: Value = serde_json::from_str(&body)?;
+        let secret = start["secret"].as_str().context("secret")?;
+        let code = current_totp(secret)?;
+        let (status, body) = http
+            .call(
+                18000,
+                Some(&project.pref),
+                "POST",
+                "/auth/v1/factors/totp/confirm",
+                Some(enroll),
+                Some(json!({"code": code})),
+            )
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = http
+            .call(
+                18000,
+                Some(&project.pref),
+                "POST",
+                "/auth/v1/factors/finish",
+                Some(enroll),
+                None,
+            )
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let done: Value = serde_json::from_str(&body)?;
+        let codes = done["recovery_codes"].as_array().context("codes")?;
+        assert_eq!(codes.len(), 8);
+        let backup = codes[0].as_str().unwrap().to_string();
+        let (status, body) = http
+            .call(
+                18000,
+                Some(&project.pref),
+                "POST",
+                "/auth/v1/token",
+                None,
+                Some(json!({"email": email, "password": "password123"})),
+            )
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let mfa: Value = serde_json::from_str(&body)?;
+        assert_eq!(mfa["mfa_required"], true);
+        let mfa_token = mfa["mfa_token"].as_str().unwrap();
+        let (status, body) = http
+            .call(
+                18000,
+                Some(&project.pref),
+                "POST",
+                "/auth/v1/factors/totp",
+                None,
+                Some(json!({"mfa_token": mfa_token, "code": current_totp(secret)?})),
+            )
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let (_, body) = http
+            .call(
+                18000,
+                Some(&project.pref),
+                "POST",
+                "/auth/v1/token",
+                None,
+                Some(json!({"email": email, "password": "password123"})),
+            )
+            .await?;
+        let mfa: Value = serde_json::from_str(&body)?;
+        let mfa_token = mfa["mfa_token"].as_str().unwrap();
+        let (status, body) = http
+            .call(
+                18000,
+                Some(&project.pref),
+                "POST",
+                "/auth/v1/factors/recovery",
+                None,
+                Some(json!({"mfa_token": mfa_token, "code": backup})),
+            )
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let (_, body) = http
+            .call(
+                18000,
+                Some(&project.pref),
+                "POST",
+                "/auth/v1/token",
+                None,
+                Some(json!({"email": email, "password": "password123"})),
+            )
+            .await?;
+        let mfa: Value = serde_json::from_str(&body)?;
+        let burned = mfa["mfa_token"].as_str().unwrap();
+        for _ in 0..5 {
+            let (status, _) = http
+                .call(
+                    18000,
+                    Some(&project.pref),
+                    "POST",
+                    "/auth/v1/factors/totp",
+                    None,
+                    Some(json!({"mfa_token": burned, "code": "000000"})),
+                )
+                .await?;
+            assert_eq!(status, 401);
+        }
+        let (status, _) = http
+            .call(
+                18000,
+                Some(&project.pref),
+                "POST",
+                "/auth/v1/factors/totp",
+                None,
+                Some(json!({"mfa_token": burned, "code": current_totp(secret)?})),
+            )
+            .await?;
+        assert_eq!(status, 401, "burned factor challenge still worked");
+        let (status, body) = http
+            .call(
+                18000,
+                None,
+                "PUT",
+                &format!("/console/v1/projects/{}/auth", project.pref),
+                Some(&token),
+                Some(json!({"require_email_verification": false, "require_mfa": false})),
+            )
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = http
+            .call(
+                18000,
+                Some(&project.pref),
+                "POST",
+                "/auth/v1/token",
+                None,
+                Some(json!({"email": email, "password": "password123"})),
+            )
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let session: Value = serde_json::from_str(&body)?;
+        assert!(session["access_token"].as_str().is_some(), "{body}");
+        let _ = status;
+        Ok(())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn gate_project_passkey() {
+    run_gate(async {
+        let http = live().await?;
+        let project = create_project(&http, 18000).await?;
+        allow_password(&http, &project).await?;
+        let user = signup(&http, &project).await?;
+        let origin = format!("http://{}.apps.localhost:18000", project.pref);
+        let client = reqwest::Client::builder()
+            .dns_resolver(Arc::new(LocalDns))
+            .timeout(Duration::from_secs(40))
+            .build()?;
+        let res = client
+            .post(Http::url(18000, Some(&project.pref), "/auth/v1/factors/passkey/register/options"))
+            .bearer_auth(&user.access)
+            .header("origin", &origin)
+            .send()
+            .await?;
+        let status = res.status();
+        let options: Value = res.json().await?;
+        assert_eq!(status, 200, "{options}");
+        assert!(options.get("publicKey").is_some() || options.get("rp").is_some(), "{options}");
+        let res = client
+            .post(Http::url(18000, Some(&project.pref), "/auth/v1/factors/passkey/register"))
+            .bearer_auth(&user.access)
+            .header("origin", &origin)
+            .json(&json!({"id": "aa", "rawId": "aa", "type": "public-key", "response": {"clientDataJSON": "aaaa", "attestationObject": "aaaa"}}))
+            .send()
+            .await?;
+        let status = res.status().as_u16();
+        let body = res.text().await.unwrap_or_default();
+        assert!(status == 400 || status == 401, "tampered passkey accepted: {status} {body}");
+        Ok(())
+    })
+    .await;
+}
+
+async fn mock_authorize(
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Redirect {
+    let redirect = query.get("redirect_uri").cloned().unwrap_or_default();
+    let state = query.get("state").cloned().unwrap_or_default();
+    axum::response::Redirect::temporary(&format!("{redirect}?code=from-mock&state={state}"))
+}
+
+async fn mock_token() -> axum::Json<Value> {
+    axum::Json(json!({"access_token": "mock-access"}))
+}
+
+async fn mock_userinfo(
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::Json<Value> {
+    let email = query
+        .get("email")
+        .cloned()
+        .unwrap_or_else(|| "oauth@example.com".into());
+    let verified = query
+        .get("verified")
+        .map(|value| value != "false")
+        .unwrap_or(true);
+    axum::Json(json!({"sub": format!("sub-{email}"), "email": email, "email_verified": verified}))
+}
+
+async fn spawn_mock() -> anyhow::Result<String> {
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
+    let port = listener.local_addr()?.port();
+    let app = axum::Router::new()
+        .route("/authorize", axum::routing::get(mock_authorize))
+        .route("/token", axum::routing::post(mock_token))
+        .route("/userinfo", axum::routing::get(mock_userinfo));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    Ok(format!("http://host.docker.internal:{port}"))
+}
+
+async fn oauth_code(
+    client: &reqwest::Client,
+    pref: &str,
+    redirect_to: &str,
+) -> anyhow::Result<String> {
+    let start = client
+        .get(Http::url(
+            18000,
+            Some(pref),
+            &format!("/auth/v1/authorize?provider=google&redirect_to={redirect_to}"),
+        ))
+        .send()
+        .await?;
+    assert!(start.status().is_redirection(), "{}", start.status());
+    let next = start
+        .headers()
+        .get("location")
+        .context("authorize location")?
+        .to_str()?
+        .to_string();
+    let provider = client.get(next).send().await?;
+    assert!(provider.status().is_redirection(), "{}", provider.status());
+    let callback = provider
+        .headers()
+        .get("location")
+        .context("provider location")?
+        .to_str()?
+        .to_string();
+    let done = client.get(callback).send().await?;
+    assert!(done.status().is_redirection(), "{}", done.status());
+    let landed = done
+        .headers()
+        .get("location")
+        .context("callback location")?
+        .to_str()?;
+    let code = landed
+        .split("code=")
+        .nth(1)
+        .context("code")?
+        .split('&')
+        .next()
+        .unwrap();
+    Ok(code.to_string())
+}
+
+#[tokio::test]
+async fn gate_oauth() {
+    run_gate(async {
+        let http = live().await?;
+        let project = create_project(&http, 18000).await?;
+        allow_password(&http, &project).await?;
+        let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+        let console = console_token(&pool, &http, &project).await?;
+        let base = spawn_mock().await?;
+        let redirect_to = "http://app.example/done";
+        let (status, body) = http
+            .call(
+                18000,
+                None,
+                "POST",
+                &format!("/console/v1/projects/{}/auth/providers", project.pref),
+                Some(&console),
+                Some(json!({
+                    "provider": "google",
+                    "client_id": "client",
+                    "client_secret": "secret",
+                    "redirects": [redirect_to],
+                    "extra": {
+                        "authorize_url": format!("{base}/authorize"),
+                        "token_url": format!("{base}/token"),
+                        "userinfo_url": format!("{base}/userinfo?email=new-oauth@example.com&verified=true")
+                    }
+                })),
+            )
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = http
+            .call(18000, Some(&project.pref), "GET", "/auth/v1/authorize?provider=google&redirect_to=http://evil.example/steal", None, None)
+            .await?;
+        assert_eq!(status, 400, "{body}");
+        let client = reqwest::Client::builder()
+            .dns_resolver(Arc::new(LocalDns))
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(40))
+            .build()?;
+        let code = oauth_code(&client, &project.pref, redirect_to).await?;
+        let (status, body) = http
+            .call(18000, Some(&project.pref), "POST", "/auth/v1/token", None, Some(json!({"code": code})))
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let session: Value = serde_json::from_str(&body)?;
+        assert_eq!(session["user"]["email"], "new-oauth@example.com");
+        let (status, _) = http
+            .call(18000, Some(&project.pref), "POST", "/auth/v1/token", None, Some(json!({"code": code})))
+            .await?;
+        assert_eq!(status, 401);
+        let linked = format!("link-{}@example.com", &project.pref[..8]);
+        signup_as(&http, &project, &linked).await?;
+        let (status, body) = http
+            .call(
+                18000,
+                None,
+                "POST",
+                &format!("/console/v1/projects/{}/auth/providers", project.pref),
+                Some(&console),
+                Some(json!({
+                    "provider": "google",
+                    "client_id": "client",
+                    "client_secret": "secret",
+                    "redirects": [redirect_to],
+                    "extra": {
+                        "authorize_url": format!("{base}/authorize"),
+                        "token_url": format!("{base}/token"),
+                        "userinfo_url": format!("{base}/userinfo?email={linked}&verified=true")
+                    }
+                })),
+            )
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let code = oauth_code(&client, &project.pref, redirect_to).await?;
+        let (status, body) = http
+            .call(18000, Some(&project.pref), "POST", "/auth/v1/token", None, Some(json!({"code": code})))
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let linked_session: Value = serde_json::from_str(&body)?;
+        assert_eq!(linked_session["user"]["email"], linked);
+        let (status, body) = http
+            .call(
+                18000,
+                None,
+                "POST",
+                &format!("/console/v1/projects/{}/auth/providers", project.pref),
+                Some(&console),
+                Some(json!({
+                    "provider": "google",
+                    "client_id": "client",
+                    "redirects": [redirect_to],
+                    "extra": {
+                        "authorize_url": format!("{base}/authorize"),
+                        "token_url": format!("{base}/token"),
+                        "userinfo_url": format!("{base}/userinfo?email=nope@example.com&verified=false")
+                    }
+                })),
+            )
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let start = client
+            .get(Http::url(18000, Some(&project.pref), &format!("/auth/v1/authorize?provider=google&redirect_to={redirect_to}")))
+            .send()
+            .await?;
+        let provider = client.get(start.headers().get("location").unwrap().to_str()?).send().await?;
+        let done = client.get(provider.headers().get("location").unwrap().to_str()?).send().await?;
+        let landed = done.headers().get("location").context("error redirect")?.to_str()?;
+        assert!(landed.contains("error=email_not_verified"), "{landed}");
+        let (status, body) = http
+            .call(
+                18000,
+                None,
+                "POST",
+                &format!("/console/v1/projects/{}/auth/providers", project.pref),
+                Some(&console),
+                Some(json!({
+                    "provider": "google",
+                    "client_id": "client",
+                    "redirects": [redirect_to],
+                    "enabled": false,
+                    "extra": {"authorize_url": format!("{base}/authorize"), "token_url": format!("{base}/token"), "userinfo_url": format!("{base}/userinfo")}
+                })),
+            )
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = http
+            .call(18000, Some(&project.pref), "GET", &format!("/auth/v1/authorize?provider=google&redirect_to={redirect_to}"), None, None)
+            .await?;
+        assert_eq!(status, 404, "{body}");
+        Ok(())
+    })
+    .await;
 }

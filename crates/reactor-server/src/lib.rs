@@ -3,10 +3,13 @@ mod config;
 mod console;
 mod db;
 mod email;
+mod factors;
 mod flows;
 mod http_edge;
 mod lambda;
 mod mfa;
+mod oauth;
+mod project_auth;
 mod sites_proc;
 
 use axum::body::Body;
@@ -289,6 +292,9 @@ pub fn router(state: AppState) -> Router {
             .route("/auth/v1/logout", post(logout))
             .route("/auth/v1/user", get(user));
         app = flows::mount(app);
+        app = project_auth::mount(app);
+        app = factors::mount(app);
+        app = oauth::mount(app);
     }
     if all || handler == "storage" {
         app = app
@@ -490,6 +496,9 @@ async fn create_project(
     store_api_key(&state.pool, id, "service", &service)
         .await
         .map_err(internal)?;
+    project_auth::insert_settings(&state.pool, id)
+        .await
+        .map_err(internal)?;
     reload(&state).await?;
     Ok(Json(ProjectOut {
         id,
@@ -672,7 +681,7 @@ async fn signup(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<SignupBody>,
-) -> Result<Json<TokenOut>, ApiError> {
+) -> Result<Response, ApiError> {
     let resolved = resolve_project(&state, &headers, false).await?;
     limit_auth(&state, &headers, resolved.project_id, "signup", 30).await?;
     if body.password.len() < 8 {
@@ -717,7 +726,37 @@ async fn signup(
         return Err(internal(err));
     }
     console::record_log(&state.pool, resolved.project_id, "auth", "signup", 201, "").await;
-    issue_session(&state, resolved.project_id, &resolved.pref, user_id, email).await
+    let (require_email, _) = project_auth::flags(&state, resolved.project_id).await?;
+    if require_email {
+        match project_auth::send_confirm(&state, resolved.project_id, user_id, &email).await {
+            Ok(()) => {
+                return Ok(Json(project_auth::pending(user_id, &email)).into_response());
+            }
+            Err(email::DeliverError::Unconfigured) => {
+                let _ = sqlx::query("DELETE FROM reactor.users WHERE id = $1")
+                    .bind(user_id)
+                    .execute(&state.pool)
+                    .await;
+                return Err(ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "email is not configured",
+                ));
+            }
+            Err(email::DeliverError::Failed) => {
+                let _ = sqlx::query("DELETE FROM reactor.users WHERE id = $1")
+                    .bind(user_id)
+                    .execute(&state.pool)
+                    .await;
+                return Err(ApiError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "email could not be sent",
+                ));
+            }
+        }
+    }
+    issue_session(&state, resolved.project_id, &resolved.pref, user_id, email)
+        .await
+        .map(|body| body.into_response())
 }
 
 #[derive(Deserialize)]
@@ -725,29 +764,35 @@ struct TokenBody {
     email: Option<String>,
     password: Option<String>,
     refresh_token: Option<String>,
+    code: Option<String>,
 }
 
 async fn token(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<TokenBody>,
-) -> Result<Json<TokenOut>, ApiError> {
-    if let Some(refresh) = body.refresh_token {
-        return refresh_session(&state, &refresh).await;
+) -> Result<Response, ApiError> {
+    if let Some(refresh) = body.refresh_token.filter(|token| !token.is_empty()) {
+        return refresh_session(&state, &refresh)
+            .await
+            .map(|body| body.into_response());
+    }
+    if let Some(code) = body.code.filter(|code| !code.is_empty()) {
+        return oauth::exchange_code(&state, &headers, &code).await;
     }
     let resolved = resolve_project(&state, &headers, false).await?;
     limit_auth(&state, &headers, resolved.project_id, "token", 60).await?;
     let email = body.email.unwrap_or_default().trim().to_ascii_lowercase();
     let password = body.password.unwrap_or_default();
-    let row: Option<(Uuid, Option<String>)> = sqlx::query_as(
-        "SELECT id, password_hash FROM reactor.users WHERE project_id = $1 AND email = $2",
+    let row: Option<(Uuid, Option<String>, bool)> = sqlx::query_as(
+        "SELECT id, password_hash, email_verified_at IS NOT NULL FROM reactor.users WHERE project_id = $1 AND email = $2",
     )
     .bind(resolved.project_id)
     .bind(&email)
     .fetch_optional(&state.pool)
     .await
     .map_err(internal)?;
-    let Some((user_id, Some(password_hash))) = row else {
+    let Some((user_id, Some(password_hash), verified)) = row else {
         console::record_log(
             &state.pool,
             resolved.project_id,
@@ -771,8 +816,35 @@ async fn token(
         .await;
         return Err(ApiError::unauthorized("invalid credentials"));
     }
+    let (require_email, require_mfa) = project_auth::flags(&state, resolved.project_id).await?;
+    if require_email && !verified {
+        console::record_log(
+            &state.pool,
+            resolved.project_id,
+            "auth",
+            "token",
+            200,
+            "verification required",
+        )
+        .await;
+        return Ok(Json(project_auth::pending(user_id, &email)).into_response());
+    }
+    if require_mfa {
+        console::record_log(
+            &state.pool,
+            resolved.project_id,
+            "auth",
+            "token",
+            200,
+            "mfa",
+        )
+        .await;
+        return factors::after_password(&state, resolved.project_id, user_id).await;
+    }
     console::record_log(&state.pool, resolved.project_id, "auth", "token", 200, "").await;
-    issue_session(&state, resolved.project_id, &resolved.pref, user_id, email).await
+    issue_session(&state, resolved.project_id, &resolved.pref, user_id, email)
+        .await
+        .map(|body| body.into_response())
 }
 
 pub(crate) async fn issue_session(
@@ -883,7 +955,7 @@ async fn logout(
 async fn user(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<UserOut>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let resolved = resolve_project(&state, &headers, true).await?;
     let Some(identity) = resolved.identity else {
         return Err(ApiError::unauthorized("token required"));
@@ -891,14 +963,16 @@ async fn user(
     let Some(user_id) = identity.user_id else {
         return Err(ApiError::unauthorized("user token required"));
     };
-    let email: Option<String> =
-        sqlx::query_scalar("SELECT email FROM reactor.users WHERE id = $1 AND project_id = $2")
-            .bind(user_id)
-            .bind(resolved.project_id)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(internal)?;
-    let Some(email) = email else {
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT email, to_char(email_verified_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
+         FROM reactor.users WHERE id = $1 AND project_id = $2",
+    )
+    .bind(user_id)
+    .bind(resolved.project_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
+    let Some((email, email_verified_at)) = row else {
         console::record_log(
             &state.pool,
             resolved.project_id,
@@ -911,7 +985,11 @@ async fn user(
         return Err(ApiError::unauthorized("user token required"));
     };
     console::record_log(&state.pool, resolved.project_id, "auth", "user", 200, "").await;
-    Ok(Json(UserOut { id: user_id, email }))
+    Ok(Json(serde_json::json!({
+        "id": user_id,
+        "email": email,
+        "email_verified_at": email_verified_at,
+    })))
 }
 
 async fn proxy_data(State(state): State<AppState>, req: Request) -> Result<Response, ApiError> {
@@ -1926,14 +2004,26 @@ async fn site_fallback(State(state): State<AppState>, req: Request) -> Result<Re
     .await
     .map_err(internal)?
     .unwrap_or_default();
-    let file: Option<(String, String)> = sqlx::query_as(
-        "SELECT blob_key, content_type FROM reactor.site_files WHERE project_id = $1 AND path = $2",
-    )
-    .bind(project.project_id)
-    .bind(&path)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(internal)?;
+    let mut candidates = vec![path.clone()];
+    if path.ends_with('/') {
+        candidates.push(format!("{path}index.html"));
+    } else if !path.contains('.') {
+        candidates.push(format!("{path}/index.html"));
+    }
+    let mut file: Option<(String, String)> = None;
+    for candidate in &candidates {
+        file = sqlx::query_as(
+            "SELECT blob_key, content_type FROM reactor.site_files WHERE project_id = $1 AND path = $2",
+        )
+        .bind(project.project_id)
+        .bind(candidate)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(internal)?;
+        if file.is_some() {
+            break;
+        }
+    }
     if let Some((blob_key, content_type)) = file {
         let Some((bytes, _)) = state.blobs.get(&blob_key).await.map_err(internal)? else {
             console::record_log(

@@ -6,7 +6,7 @@ Replace Supabase + Vercel with a self hostable binary and an integrated CLI to i
 
 [reactor.cloud](https://www.reactor.cloud)
 
-**v1.26.09-beta.1** (package version `1.26.9-beta.1`). The API can still change before a stable tag.
+**v1.26.09-beta.2** (package version `1.26.9-beta.2`). The API can still change before a stable tag.
 
 Postgres and a blob store are the only dependencies. One stateless server serves every surface.
 
@@ -36,19 +36,19 @@ Do not start the `keys` service on its own. That command only writes the JWT key
 | Console   | `/console`    | Cluster admin. Separate from project users       |
 
 
-Docs: [concepts](docs/start/concepts.md), [quickstart](docs/start/quickstart.md), [self-hosting](docs/operate/self-hosting.md).
+Docs: [concepts](docs/start/concepts.md), [quickstart](docs/start/quickstart.md), [self-hosting](docs/operate/self-hosting.md), [AWS](docs/operate/lambda.md).
 
 Clients:
 
 ```sh
-npm install @reactor/client@beta
+npm install @reactor-cloud/client@beta
 ```
 
-Swift package `https://github.com/reactor-cloud/reactor-swift` at `1.26.9-beta.1`. Maven `sl.atomicollabs.reactor:reactor-client:1.26.9-beta.1`. The CLI is `brew tap reactor-cloud/reactor && brew install reactor`. Source for all of them is this tag, `v1.26.09-beta.1`.
+Swift package `https://github.com/reactor-cloud/reactor-swift` at `1.26.9-beta.2`. Maven `sl.atomicollabs.reactor:reactor-client:1.26.9-beta.2`. The CLI is `brew tap reactor-cloud/reactor && brew install reactor`. Source for all of them is this tag, `v1.26.09-beta.2`.
 
 ## Not included
 
-Realtime, OAuth, project-user MFA, analytics, and billing are not part of this release. Console MFA is for operators.
+Realtime, analytics, and billing are not part of this release. There is no SQL editor and no second data API. Console MFA is for operators. Project users can verify email, enroll a second factor, and sign in with a configured OAuth provider.
 
 ## Tests
 

@@ -3,7 +3,25 @@ title: HTTP
 description: The routes a client or a deploy talks to, and who may call them.
 ---
 
-Send `Authorization: Bearer` unless the row says otherwise. Project routes need a project, from the host or from the token. Error bodies use `{ "error": "..." }`.
+HTTP is the contract every client uses. The JavaScript, Swift, and Kotlin packages are thin wrappers over these routes. Send `Authorization: Bearer` unless the row says otherwise. Project routes need a project, from the host or from the token.
+
+A success body is the resource. An error body is `{ "error": "..." }` with an HTTP status. A session from signup or password login:
+
+```json
+{
+  "access_token": "eyJ...",
+  "refresh_token": "opaque-token",
+  "user": { "id": "6b1c1a4e-2f0a-4d3b-9c11-0a9e8d7c6b5a", "email": "ada@example.com" }
+}
+```
+
+Over an auth rate limit:
+
+```json
+{ "error": "too many requests" }
+```
+
+That response is status 429 and includes `Retry-After: 60`. Every response, including errors, includes `x-request-id`.
 
 ## Platform
 
@@ -23,10 +41,17 @@ No project. The operator token is not a project key.
 
 | Method | Path | Who | Body |
 | --- | --- | --- | --- |
-| `POST` | `/auth/v1/signup` | anon key | `{ email, password }` → session |
-| `POST` | `/auth/v1/token` | anon key, or the refresh token in the body | `{ email, password }` or `{ refresh_token }` → session |
+| `POST` | `/auth/v1/signup` | anon key | `{ email, password }` → session, or `{ verification_required, user }` |
+| `POST` | `/auth/v1/token` | anon key, or the refresh token in the body | `{ email, password }`, `{ refresh_token }`, or `{ code }` → session, or a verification or 2FA body |
+| `POST` | `/auth/v1/verify-email` | anon key | `{ token }` or `{ email, code }` → session |
+| `POST` | `/auth/v1/verify-email/send` | anon key | `{ email }` → `{ ok: true }` |
+| `POST` | `/auth/v1/factors/totp` | anon key | `{ mfa_token, code }` → session |
+| `POST` | `/auth/v1/factors/passkey/verify` | anon key | credential plus `mfa_token` → session |
+| `POST` | `/auth/v1/factors/recovery` | anon key | `{ mfa_token, code }` → session |
+| `GET` | `/auth/v1/authorize` | anon key | `provider` and `redirect_to` query → redirect |
+| `GET` | `/auth/v1/callback/{provider}` | browser | provider code → redirect with `code` or `error` |
 | `POST` | `/auth/v1/logout` | the refresh token in the body | `{ refresh_token }` → 204 |
-| `GET` | `/auth/v1/user` | user access token | `{ id, email }` |
+| `GET` | `/auth/v1/user` | user access token | `{ id, email, email_verified_at }` |
 | `POST` | `/auth/v1/magic-link` | anon key | `{ email }` → `{ ok: true }` |
 | `POST` | `/auth/v1/verify` | project | `{ token }` → session |
 | `POST` | `/auth/v1/recover` | anon key | `{ email }` → `{ ok: true }` |
@@ -41,6 +66,19 @@ Signup, magic-link, recover, and invite are limited to 30 requests a minute per 
 `OPTIONS` on `/auth/v1`, `/data/v1`, `/storage/v1`, and `/fn/v1` returns 204. A response echoes `Origin` when the host is `localhost`, `127.0.0.1`, `*.{base_domain}`, or a verified domain. Allowed request headers are `Authorization`, `Content-Type`, `apikey`, `Prefer`, `Range`, and `Accept`. An unknown origin gets no allow-origin header.
 
 Every response includes `x-request-id`. Each process logs its own requests. There is no hosted metrics product.
+
+`GET /health` is 200 with an empty body when Postgres accepts `SELECT 1`, and 503 when it does not. It does not return JSON.
+
+Creating a project with the operator token returns the keys once:
+
+```json
+{
+  "id": "019f0000-0000-7000-8000-000000000000",
+  "ref": "abcdefghijklmnopqrst",
+  "anon_key": "eyJ...",
+  "service_key": "eyJ..."
+}
+```
 
 ## Data, storage, functions
 

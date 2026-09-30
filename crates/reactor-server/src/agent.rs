@@ -721,7 +721,7 @@ fn system_prompt(project_ref: &Option<String>) -> String {
         .unwrap_or_else(|| "No project is open.".into());
     format!(
         "You are Reactor Operator. Do the user's task with the tools. Take refs and ids from tool results; do not invent them. Never repeat API keys or passwords. {open} \
-create_project takes a name and returns a ref. create_table columns use type text, uuid, int, bool, timestamptz, or jsonb. \
+create_project takes a name and returns a ref. create_table columns use type text, uuid, int, bool, date, timestamptz, numeric, or jsonb. \
 insert_row returns the primary key as id. update_row writes one cell. create_user adds a project user and needs a password of at least 8 characters. \
 put_object stores a file at a path such as notes/hello.txt. put_site_file with path index.html publishes the site."
     )
@@ -903,6 +903,9 @@ async fn create_project(
     )
     .await
     .map_err(|err| err.to_string())?;
+    crate::project_auth::insert_settings(&state.pool, id)
+        .await
+        .map_err(|err| err.to_string())?;
     let _keys = issue_keys(state, id, &pref)
         .await
         .map_err(|err| err.text().to_string())?;

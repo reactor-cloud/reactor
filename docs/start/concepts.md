@@ -1,9 +1,15 @@
 ---
 title: Concepts
-description: Tenancy, identity, and the shape of a Reactor v2 deployment.
+description: Tenancy, identity, and how one Reactor process serves many projects.
 ---
 
-A Reactor process does not store a current tenant. Every request resolves a project, then the database transaction is limited to that project's schema.
+This page is the model behind every other page. A cluster is one Reactor process, Postgres, and a blob store. The process does not remember a current tenant between requests. Every request resolves a project, then the database transaction is limited to that project's schema. Project users and console operators are different identities, and they cannot use each other's tokens.
+
+If the hostname and the token name different projects, the response is 403:
+
+```json
+{ "error": "host and token project mismatch" }
+```
 
 ## One server
 

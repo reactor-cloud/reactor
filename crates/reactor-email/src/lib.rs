@@ -34,6 +34,13 @@ pub fn reserved() -> &'static [Template] {
             body_html:
                 "<p>Accept the invite for {{email}}.</p><p><a href=\"{{link}}\">{{link}}</a></p>",
         },
+        Template {
+            name: "confirm_email",
+            subject: "Confirm your email",
+            body_text: "Confirm {{email}}.\n\nCode: {{code}}\n\n{{link}}\n",
+            body_html:
+                "<p>Confirm {{email}}.</p><p>Code: {{code}}</p><p><a href=\"{{link}}\">{{link}}</a></p>",
+        },
     ]
 }
 
@@ -42,9 +49,14 @@ pub fn reserved_name(name: &str) -> bool {
 }
 
 pub fn render(body: &str, email: &str, token: &str, link: &str) -> String {
+    fill(body, email, token, link, "")
+}
+
+pub fn fill(body: &str, email: &str, token: &str, link: &str, code: &str) -> String {
     body.replace("{{email}}", email)
         .replace("{{token}}", token)
         .replace("{{link}}", link)
+        .replace("{{code}}", code)
 }
 
 pub fn auth_link(base: &str, token: &str) -> String {
@@ -109,7 +121,7 @@ pub fn send(mail: &Mail, to: &str, subject: &str, text: &str, html: &str) -> any
 
 #[cfg(test)]
 mod tests {
-    use super::{auth_link, render};
+    use super::{auth_link, fill, render};
 
     #[test]
     fn fills_the_link_and_the_token() {
@@ -120,6 +132,16 @@ mod tests {
             "https://app/?token=tok",
         );
         assert_eq!(body, "Hi a@b.co https://app/?token=tok tok");
+        assert_eq!(
+            fill(
+                "Code {{code}} {{link}}",
+                "a@b.co",
+                "tok",
+                "https://app/?token=tok",
+                "123456"
+            ),
+            "Code 123456 https://app/?token=tok"
+        );
         assert_eq!(
             auth_link("https://app/cb", "tok"),
             "https://app/cb?token=tok"

@@ -1,5 +1,6 @@
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from "react-router-dom"
 import { Logo } from "@/components/logo"
+import { SurfaceLinks } from "@/components/surfaces"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -23,7 +24,6 @@ import {
   KeyRound,
   LayoutDashboard,
   LogOut,
-  Mail,
   Plus,
   ScrollText,
   Server,
@@ -37,7 +37,6 @@ const sections = [
   { path: "", label: "Overview", icon: LayoutDashboard },
   { path: "keys", label: "API keys", icon: KeyRound },
   { path: "auth", label: "Auth", icon: Users },
-  { path: "email", label: "Email", icon: Mail },
   { path: "data", label: "Data", icon: Database },
   { path: "storage", label: "Storage", icon: HardDrive },
   { path: "functions", label: "Functions", icon: Zap },
@@ -54,6 +53,7 @@ export type ConsoleContext = {
   role: string
   name: string
   email: string
+  platformAdmin: boolean
 }
 
 export function Shell() {
@@ -238,6 +238,7 @@ export function Shell() {
             </DropdownMenu>
           )}
           <div className="ml-auto flex items-center gap-3">
+          <SurfaceLinks />
           {clusterName && (
             <Link
               to="/cluster"
@@ -286,7 +287,7 @@ export function Shell() {
           </div>
         </header>
         <main className="relative min-h-0 min-w-0 flex-1 overflow-auto p-6">
-          <Outlet context={{ role: current?.role || "", name, email } satisfies ConsoleContext} />
+          <Outlet context={{ role: current?.role || "", name, email, platformAdmin: admin } satisfies ConsoleContext} />
         </main>
       </div>
       <Operator open={operatorOpen} onOpenChange={setOperatorOpen} projectRef={ref} />

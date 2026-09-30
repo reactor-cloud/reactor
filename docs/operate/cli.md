@@ -1,11 +1,32 @@
 ---
 title: CLI
-description: The reactor command. Console session, projects, deploy, and migrations.
+description: Install reactor, then sign in, create projects, deploy, and migrate.
 ---
 
-`reactor` talks to `/console/v1` with a console session, and to the platform routes with an operator token. Named sessions live in `~/.config/reactor/contexts.json`. `REACTOR_HOME` overrides that directory. `--context` or `REACTOR_CONTEXT` selects one for a single command.
+`reactor` is the command-line client for a cluster. It talks to `/console/v1` with a console session, and to the platform routes with an operator token. Use it to create the first operator, link a project directory, and ship SQL, functions, and a site.
+
+Named sessions live in `~/.config/reactor/contexts.json`. `REACTOR_HOME` overrides that directory. `--context` or `REACTOR_CONTEXT` selects one for a single command.
 
 Project commands read `reactor.toml` in the current directory and use the session whose URL matches that file.
+
+## Install
+
+Homebrew, on a Mac:
+
+```sh
+brew tap reactor-cloud/reactor
+brew install reactor
+```
+
+`v1.26.09-beta.2` builds from source and needs Rust, which Homebrew installs as a build dependency. The formula uses tag `v1.26.09-beta.2` of [reactor-cloud/reactor](https://github.com/reactor-cloud/reactor).
+
+From a clone of the server repository, at the repository root:
+
+```sh
+cargo install --locked --path crates/reactor-cli
+```
+
+That binary is named `reactor-cli`. Homebrew renames it to `reactor`. Either name runs the same commands.
 
 ## Session
 
@@ -32,7 +53,15 @@ reactor link --url http://127.0.0.1:18000 --ref <ref> --service-key <service key
 reactor keys rotate
 ```
 
-`projects` lists projects this operator can open. `create` prints the ref, anon key, and service key once. `--link` writes `reactor.toml` and `.reactor/service_key`. `link` does the same write when you already have the key. `keys rotate` prints a new pair and rewrites `.reactor/service_key` when that file exists.
+`projects` lists projects this operator can open. `create` prints the ref, anon key, and service key once:
+
+```text
+ref: abcdefghijklmnopqrst
+anon: eyJ...
+service: eyJ...
+```
+
+`--link` writes `reactor.toml` and `.reactor/service_key`. `link` does the same write when you already have the key. `keys rotate` prints a new pair and rewrites `.reactor/service_key` when that file exists. The previous anon and service keys stop working.
 
 ## Deploy and database
 
@@ -43,7 +72,7 @@ reactor db tables
 reactor db rows todos
 ```
 
-`deploy` uses the service key in `.reactor/service_key`. It applies pending project migrations, uploads `functions/<name>/` as zips, and uploads `site/` as one deployment.
+`deploy` uses the service key in `.reactor/service_key`. It applies pending project migrations, uploads `functions/<name>/` as zips, and uploads `site/` as one deployment. A failed file upload does not promote the site.
 
 `db migrate --all` needs the operator token from `login --token`. `--dry-run` lists project refs and does not apply SQL. `db tables` and `db rows` read the linked project through the console. `rows` prints up to 50 lines.
 

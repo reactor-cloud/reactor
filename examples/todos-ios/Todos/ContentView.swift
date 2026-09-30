@@ -28,17 +28,27 @@ final class TodosModel: ObservableObject {
 
     func signUp() async {
         await run {
-            _ = try await client.auth.signUp(email: email, password: password)
-            signedIn = true
-            await load()
+            try await finish(client.auth.signUp(email: email, password: password))
         }
     }
 
     func signIn() async {
         await run {
-            _ = try await client.auth.signInWithPassword(email: email, password: password)
+            try await finish(client.auth.signInWithPassword(email: email, password: password))
+        }
+    }
+
+    private func finish(_ outcome: AuthOutcome) async throws {
+        switch outcome {
+        case .session:
             signedIn = true
             await load()
+        case .verificationRequired:
+            error = "Check your email to verify this account."
+        case .mfaRequired:
+            error = "A second factor is required."
+        case .enrollmentRequired:
+            error = "Enroll a second factor to finish sign-in."
         }
     }
 

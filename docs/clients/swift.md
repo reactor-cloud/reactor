@@ -1,9 +1,15 @@
 ---
 title: Swift
-description: ReactorClient for iOS and macOS. Auth, a small query builder, storage, and functions.
+description: ReactorClient for iOS 17 and macOS 14. Auth, queries, storage, and functions.
 ---
 
-The Swift package is published from tag `v1.26.09-beta.1` at `https://github.com/reactor-cloud/reactor-swift`. It builds for iOS 17 and macOS 14. The product name is `Reactor`. It is source-available under BUSL-1.1, version `1.26.9-beta.1`.
+The Swift client is for iOS and macOS apps. It covers the same four surfaces as the JavaScript client: auth, a query builder for Postgres, file storage, and functions. The query builder is smaller than PostgREST. Use HTTP when you need embeds, `or`, or a range this builder does not express.
+
+Add the package from GitHub. The release is the git tag `v1.26.09-beta.2`. There is no second registry. The tag is not valid semver because of the `09`, so pin that tag rather than a version range. The product name is `Reactor`. It builds for iOS 17 and macOS 14.
+
+```swift
+.package(url: "https://github.com/reactor-cloud/reactor-swift", exact: "1.26.09-beta.2")
+```
 
 ```swift
 import Reactor
@@ -15,28 +21,36 @@ let reactor = ReactorClient(
 )
 ```
 
-`sessionStore` defaults to memory. `KeychainSessionStore` keeps the session under the service name `lab.reactor.session`.
+`sessionStore` defaults to memory, which lasts until the process exits. `KeychainSessionStore` keeps the session under the service name `lab.reactor.session`.
 
 ## Auth
 
 ```swift
-let session = try await reactor.auth.signUp(email: email, password: password)
-let session = try await reactor.auth.signInWithPassword(email: email, password: password)
+let outcome = try await reactor.auth.signUp(email: email, password: password)
+let outcome = try await reactor.auth.signInWithPassword(email: email, password: password)
 let user = try await reactor.auth.getUser()
 let session = try await reactor.auth.refreshSession()
 try await reactor.auth.signOut()
 let session = reactor.auth.getSession()
 ```
 
-JSON from the server uses `access_token` and `refresh_token`. The Swift properties are `accessToken` and `refreshToken`.
+JSON from the server uses `access_token` and `refresh_token`. The Swift properties are `accessToken` and `refreshToken`. A session from signup or password sign-in is:
 
-`signInWithOAuth` throws. OAuth is not implemented.
+```json
+{
+  "access_token": "eyJ...",
+  "refresh_token": "opaque-token",
+  "user": { "id": "6b1c1a4e-2f0a-4d3b-9c11-0a9e8d7c6b5a", "email": "ada@example.com" }
+}
+```
 
-Failures throw `ReactorError` with `status` and `message`.
+`signUp` and `signInWithPassword` return `AuthOutcome`: `.session`, `.verificationRequired`, `.mfaRequired`, or `.enrollmentRequired`. Only `.session` is stored. `verifyEmail`, `verifyTotp`, `verifyPasskey`, `verifyRecovery`, `enrollTotp`, and `enrollPasskey` call the matching routes. `signInWithOAuth(provider:redirectTo:)` returns the authorize URL. `exchangeCode` stores the session.
+
+`getUser()` returns the id and email. `getSession()` returns the stored session, or nil when nobody is signed in.
+
+Failures throw `ReactorError` with `status` and `message`. A bad password is status 401. The message does not say whether the email exists.
 
 ## Data
-
-The query builder covers the calls the first apps need. It is not the full PostgREST surface. Use HTTP for embeds, `or`, and range that this builder does not express.
 
 ```swift
 let rows = try await reactor.from("todos")
@@ -51,7 +65,7 @@ let created = try await reactor.from("todos")
   .execute()
 ```
 
-`update`, `delete`, and `eq` chain the same way. Writes send `Prefer: return=representation`.
+`execute()` returns the JSON rows. A select of todos is an array of objects with `id`, `title`, and `user_id`. Writes send `Prefer: return=representation`, so `insert` returns the stored row rather than an empty body. `update`, `delete`, and `eq` chain the same way.
 
 ## Storage and functions
 
@@ -61,3 +75,5 @@ let data = try await reactor.storage.from("files").download(path: path)
 
 let result = try await reactor.functions.invoke("ping", body: .object(["hello": .string("world")]))
 ```
+
+Upload and download presign, then call the signed URL. `upload` finishes when the PUT succeeds. `download` returns the bytes. `invoke` returns the function’s JSON. A ping that echoes its body comes back as an object with `hello` set to `world`.

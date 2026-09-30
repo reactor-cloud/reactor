@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { api, placeLabel } from "@/lib/api"
 
 type ClusterInfo = {
@@ -16,10 +17,22 @@ type ClusterInfo = {
   blobs: { ok: boolean; backend?: string }
 }
 
+type ClusterMail = {
+  host: string
+  port: number
+  username: string
+  password_set: boolean
+  from_address: string
+  tls: string
+}
+
 export function Cluster() {
   const [info, setInfo] = useState<ClusterInfo | null>(null)
   const [name, setName] = useState("")
+  const [mail, setMail] = useState<ClusterMail | null>(null)
+  const [password, setPassword] = useState("")
   const [error, setError] = useState("")
+  const [note, setNote] = useState("")
 
   useEffect(() => {
     api<ClusterInfo>("/console/v1/cluster")
@@ -27,6 +40,9 @@ export function Cluster() {
         setInfo(cluster)
         setName(cluster.name)
       })
+      .catch((err) => setError(err.message))
+    api<ClusterMail>("/console/v1/cluster/email")
+      .then(setMail)
       .catch((err) => setError(err.message))
   }, [])
 
@@ -42,6 +58,23 @@ export function Cluster() {
       setError("")
     } catch (err) {
       setError(err instanceof Error ? err.message : "rename failed")
+    }
+  }
+
+  async function saveMail(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!mail) return
+    try {
+      const saved = await api<ClusterMail>("/console/v1/cluster/email", {
+        method: "PUT",
+        body: JSON.stringify({ ...mail, password: password || undefined }),
+      })
+      setMail(saved)
+      setPassword("")
+      setNote("Mail server saved.")
+      setError("")
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "save failed")
     }
   }
 
@@ -69,6 +102,48 @@ export function Cluster() {
           </Button>
         </form>
       </section>
+
+      {mail && (
+        <section className="grid gap-3">
+          <h2 className="text-sm font-medium">Mail</h2>
+          <p className="text-sm text-muted-foreground">
+            Auth mail for a project uses this server when a platform admin allows it and the project has no server of its own.
+          </p>
+          <form className="grid gap-3" onSubmit={saveMail}>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <MailField label="Host" value={mail.host} onChange={(host) => setMail({ ...mail, host })} />
+              <MailField label="Port" value={String(mail.port)} onChange={(port) => setMail({ ...mail, port: Number(port) })} />
+              <label className="grid gap-2 text-sm">
+                <Label>TLS</Label>
+                <select
+                  className="h-8 rounded-lg border border-input bg-transparent px-2"
+                  value={mail.tls}
+                  onChange={(event) => setMail({ ...mail, tls: event.target.value })}
+                >
+                  <option value="starttls">STARTTLS</option>
+                  <option value="tls">TLS</option>
+                  <option value="none">None</option>
+                </select>
+              </label>
+            </div>
+            <MailField label="Username" value={mail.username} onChange={(username) => setMail({ ...mail, username })} />
+            <label className="grid gap-2">
+              <Label>Password</Label>
+              <Input
+                type="password"
+                value={password}
+                placeholder={mail.password_set ? "Saved. Enter a new password to replace it." : ""}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+            </label>
+            <MailField label="From address" value={mail.from_address} onChange={(from_address) => setMail({ ...mail, from_address })} />
+            <Button type="submit" variant="outline" className="w-fit">
+              Save mail server
+            </Button>
+          </form>
+          {note && <p className="text-sm text-muted-foreground">{note}</p>}
+        </section>
+      )}
 
       {info && (
         <section className="grid gap-3">
@@ -125,4 +200,13 @@ function size(bytes?: number) {
   if (bytes == null) return ""
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function MailField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return (
+    <label className="grid gap-2">
+      <Label>{label}</Label>
+      <Input value={value} onChange={(event) => onChange(event.target.value)} />
+    </label>
+  )
 }

@@ -3,7 +3,12 @@ title: Quickstart
 description: Run a local cluster, create a project, and deploy the todos example.
 ---
 
-You need Docker, and the `reactor` CLI built from `v2/`. Commands below assume the working directory is `v2/`.
+This page gets a cluster running on your machine and a small app deployed to it. You need Docker. Install the CLI with Homebrew, or from a clone if you are not on a Mac. Commands below assume the repository root, the directory that contains `deploy/` and `examples/`.
+
+```sh
+brew tap reactor-cloud/reactor
+brew install reactor
+```
 
 ## Start the cluster
 
@@ -14,7 +19,7 @@ docker compose -f deploy/compose/compose.yaml up -d
 
 `build keys` builds the app image and generates the signing key. Do not leave the `keys` service running; Compose runs it once and it exits. The app listens on `http://127.0.0.1:18000`. A second replica listens on `18001`.
 
-`GET /health` answers when Postgres and the blob store are reachable.
+`GET /health` answers when Postgres and the blob store are reachable. The body is small. A 200 means both dependencies answered.
 
 ## Create the console
 
@@ -45,7 +50,7 @@ ref = "yourprojectref"
 
 ## Deploy an app
 
-The [todos example](/examples/todos/) is `v2/examples/todos`. From that directory, after linking:
+The [todos example](/examples/todos/) is `examples/todos`. From that directory, after linking:
 
 ```sh
 reactor deploy
@@ -64,5 +69,5 @@ Signup on that page calls `/auth/v1` on the same host with the anon key. Todos a
 ## Next
 
 - [Projects](/start/projects/) for keys, schemas, and a dedicated database.
-- [CLI](/operate/cli/) for the rest of the commands.
+- [CLI](/operate/cli/) for the rest of the commands and the other ways to install it.
 - [Configuration](/operate/configuration/) when you leave the Compose defaults.

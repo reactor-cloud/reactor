@@ -3,7 +3,7 @@ title: Functions
 description: Bun or Lambda functions, versions, pins, variables, and cron.
 ---
 
-A function is a zip in the blob store and a row in Postgres: name, project, version, object key, runtime. `POST /fn/v1/{name}` runs the live version.
+Functions are server-side code for one project. A function is a zip in the blob store and a row in Postgres: name, project, version, object key, runtime. `POST /fn/v1/{name}` runs the live version. Clients send JSON and read JSON. They do not receive the database URL or the service key unless you stored those as that function’s own variables.
 
 ## Code
 
@@ -26,7 +26,13 @@ const caller = JSON.parse(process.env.REACTOR_CALLER || "{}")
 process.stdout.write(JSON.stringify({ ok: true, caller, req }))
 ```
 
-The HTTP response is `application/json` and the stdout bytes. The Bun invoke timeout is 30 seconds.
+The HTTP response is `application/json` and the stdout bytes. The example above answers:
+
+```json
+{ "ok": true, "caller": { "sub": "…", "ref": "…", "role": "authenticated" }, "req": {} }
+```
+
+A non-zero exit is status 500 and the stderr text. The Bun invoke timeout is 30 seconds. The todos `ping` function adds `banner`, which is null unless that name is one of the function's own variables.
 
 ## Deploy
 

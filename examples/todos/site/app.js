@@ -29,10 +29,23 @@
   }
 
   // ../../sdks/js/src/auth.ts
+  function isSession(body) {
+    return Boolean(body && typeof body === "object" && "access_token" in body && typeof body.access_token === "string");
+  }
   function createAuth(base, anonKey, doFetch, session) {
     async function save(next) {
       session.current = next;
       return next;
+    }
+    function settle(body) {
+      if (isSession(body)) {
+        session.current = body;
+        return body;
+      }
+      return body;
+    }
+    function bearer(token) {
+      return token ?? session.current?.access_token;
     }
     return {
       getSession() {
@@ -44,13 +57,58 @@
           token: anonKey,
           json: { email: credentials.email, password: credentials.password }
         });
-        return save(body);
+        return settle(body);
       },
       async signInWithPassword(credentials) {
         const { body } = await request(doFetch, `${base}/auth/v1/token`, {
           method: "POST",
           token: anonKey,
           json: { email: credentials.email, password: credentials.password }
+        });
+        return settle(body);
+      },
+      async signInWithMagicLink(email) {
+        await request(doFetch, `${base}/auth/v1/magic-link`, {
+          method: "POST",
+          token: anonKey,
+          json: { email }
+        });
+      },
+      async verifyMagicLink(token) {
+        const { body } = await request(doFetch, `${base}/auth/v1/verify`, {
+          method: "POST",
+          token: anonKey,
+          json: { token }
+        });
+        return save(body);
+      },
+      async recover(email) {
+        await request(doFetch, `${base}/auth/v1/recover`, {
+          method: "POST",
+          token: anonKey,
+          json: { email }
+        });
+      },
+      async completeRecovery(token, password) {
+        const { body } = await request(doFetch, `${base}/auth/v1/recover/complete`, {
+          method: "POST",
+          token: anonKey,
+          json: { token, password }
+        });
+        return save(body);
+      },
+      async invite(email, serviceKey) {
+        await request(doFetch, `${base}/auth/v1/invite`, {
+          method: "POST",
+          token: serviceKey,
+          json: { email }
+        });
+      },
+      async acceptInvite(token, password) {
+        const { body } = await request(doFetch, `${base}/auth/v1/invite/accept`, {
+          method: "POST",
+          token: anonKey,
+          json: { token, password }
         });
         return save(body);
       },
@@ -79,8 +137,75 @@
         });
         session.current = null;
       },
-      signInWithOAuth() {
-        throw new Error("unsupported");
+      async verifyEmail(input) {
+        const { body } = await request(doFetch, `${base}/auth/v1/verify-email`, {
+          method: "POST",
+          token: anonKey,
+          json: input
+        });
+        return save(body);
+      },
+      async resendVerification(email) {
+        await request(doFetch, `${base}/auth/v1/verify-email/send`, {
+          method: "POST",
+          token: anonKey,
+          json: { email }
+        });
+      },
+      async verifyTotp(mfaToken, code) {
+        const { body } = await request(doFetch, `${base}/auth/v1/factors/totp`, {
+          method: "POST",
+          token: anonKey,
+          json: { mfa_token: mfaToken, code }
+        });
+        return save(body);
+      },
+      async verifyPasskey(mfaToken, credential) {
+        const { body } = await request(doFetch, `${base}/auth/v1/factors/passkey/verify`, {
+          method: "POST",
+          token: anonKey,
+          json: { ...credential, mfa_token: mfaToken }
+        });
+        return save(body);
+      },
+      async verifyRecovery(mfaToken, code) {
+        const { body } = await request(doFetch, `${base}/auth/v1/factors/recovery`, {
+          method: "POST",
+          token: anonKey,
+          json: { mfa_token: mfaToken, code }
+        });
+        return save(body);
+      },
+      async enrollTotp(input) {
+        const path = input?.code ? "/auth/v1/factors/totp/confirm" : "/auth/v1/factors/totp/start";
+        const { body } = await request(doFetch, `${base}${path}`, {
+          method: "POST",
+          token: bearer(input?.token),
+          json: input?.code ? { code: input.code } : {}
+        });
+        return body;
+      },
+      async enrollPasskey(input) {
+        const path = input?.credential ? "/auth/v1/factors/passkey/register" : "/auth/v1/factors/passkey/register/options";
+        const { body } = await request(doFetch, `${base}${path}`, {
+          method: "POST",
+          token: bearer(input?.token),
+          json: input?.credential ?? {}
+        });
+        return body;
+      },
+      async signInWithOAuth(input) {
+        const url = `${base}/auth/v1/authorize?provider=${encodeURIComponent(input.provider)}&redirect_to=${encodeURIComponent(input.redirectTo)}`;
+        if (typeof window !== "undefined" && window.location) window.location.assign(url);
+        return url;
+      },
+      async exchangeCode(code) {
+        const { body } = await request(doFetch, `${base}/auth/v1/token`, {
+          method: "POST",
+          token: anonKey,
+          json: { code }
+        });
+        return save(body);
       }
     };
   }
@@ -4074,6 +4199,26 @@ ${cause.stack}`;
   function clearError() {
     document.getElementById("error").textContent = "";
   }
+  function finishAuth(result) {
+    if (result?.access_token) {
+      persist(result);
+      render();
+      return;
+    }
+    if (result?.verification_required) {
+      showError(new Error("Check your email to verify this account."));
+      return;
+    }
+    if (result?.mfa_required) {
+      showError(new Error("A second factor is required."));
+      return;
+    }
+    if (result?.enrollment_required) {
+      showError(new Error("Enroll a second factor to finish sign-in."));
+      return;
+    }
+    showError(new Error("Sign-in did not return a session."));
+  }
   var reactor = createClient(window.location.origin, anon, { session: saved() });
   function render() {
     const current = reactor.auth.getSession();
@@ -4129,12 +4274,11 @@ ${cause.stack}`;
     const data = new FormData(event.target);
     try {
       clearError();
-      const session = await reactor.auth.signUp({
+      const result = await reactor.auth.signUp({
         email: data.get("email"),
         password: data.get("password")
       });
-      persist(session);
-      render();
+      finishAuth(result);
     } catch (error) {
       showError(error);
     }
@@ -4144,12 +4288,11 @@ ${cause.stack}`;
     const data = new FormData(event.target);
     try {
       clearError();
-      const session = await reactor.auth.signInWithPassword({
+      const result = await reactor.auth.signInWithPassword({
         email: data.get("email"),
         password: data.get("password")
       });
-      persist(session);
-      render();
+      finishAuth(result);
     } catch (error) {
       showError(error);
     }

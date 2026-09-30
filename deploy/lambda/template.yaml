@@ -26,6 +26,18 @@ Parameters:
   CertificateArn:
     Type: String
     Default: ""
+  FunctionName:
+    Type: String
+    Default: reactor-v2
+  LayerName:
+    Type: String
+    Default: reactor-bun
+  LogGroupName:
+    Type: String
+    Default: /reactor/site
+  TaskFamily:
+    Type: String
+    Default: reactor-site
 
 Globals:
   Function:
@@ -247,7 +259,7 @@ Resources:
       - DbInstance
       - PrivateRoute
     Properties:
-      FunctionName: reactor-v2
+      FunctionName: !Ref FunctionName
       PackageType: Image
       ImageUri: !Ref ImageUri
       Timeout: 300
@@ -295,7 +307,7 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: lambda:InvokeFunction
-              Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:reactor-v2
+              Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${FunctionName}
             - Effect: Allow
               Action:
                 - lambda:GetFunction
@@ -337,7 +349,7 @@ Resources:
   BunLayer:
     Type: AWS::Serverless::LayerVersion
     Properties:
-      LayerName: reactor-bun
+      LayerName: !Ref LayerName
       ContentUri: bun-layer
       CompatibleRuntimes:
         - provided.al2023
@@ -452,7 +464,7 @@ Resources:
   SiteLogs:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: /reactor/site
+      LogGroupName: !Ref LogGroupName
       RetentionInDays: 7
 
   EcsExecutionRole:
@@ -518,7 +530,7 @@ Resources:
   SiteTask:
     Type: AWS::ECS::TaskDefinition
     Properties:
-      Family: reactor-site
+      Family: !Ref TaskFamily
       RequiresCompatibilities:
         - FARGATE
       NetworkMode: awsvpc

@@ -21,6 +21,27 @@ function clearError() {
   document.getElementById("error").textContent = ""
 }
 
+function finishAuth(result) {
+  if (result?.access_token) {
+    persist(result)
+    render()
+    return
+  }
+  if (result?.verification_required) {
+    showError(new Error("Check your email to verify this account."))
+    return
+  }
+  if (result?.mfa_required) {
+    showError(new Error("A second factor is required."))
+    return
+  }
+  if (result?.enrollment_required) {
+    showError(new Error("Enroll a second factor to finish sign-in."))
+    return
+  }
+  showError(new Error("Sign-in did not return a session."))
+}
+
 const reactor = createClient(window.location.origin, anon, { session: saved() })
 
 function render() {
@@ -83,12 +104,11 @@ document.getElementById("signup").addEventListener("submit", async (event) => {
   const data = new FormData(event.target)
   try {
     clearError()
-    const session = await reactor.auth.signUp({
+    const result = await reactor.auth.signUp({
       email: data.get("email"),
       password: data.get("password"),
     })
-    persist(session)
-    render()
+    finishAuth(result)
   } catch (error) {
     showError(error)
   }
@@ -99,12 +119,11 @@ document.getElementById("login").addEventListener("submit", async (event) => {
   const data = new FormData(event.target)
   try {
     clearError()
-    const session = await reactor.auth.signInWithPassword({
+    const result = await reactor.auth.signInWithPassword({
       email: data.get("email"),
       password: data.get("password"),
     })
-    persist(session)
-    render()
+    finishAuth(result)
   } catch (error) {
     showError(error)
   }

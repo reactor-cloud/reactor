@@ -1,17 +1,26 @@
-use crate::console::{record_log, require_member, require_operator};
+use crate::console::{record_log, require_member, require_operator, require_platform_admin};
 use crate::{internal, ApiError, AppState};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use reactor_auth::{seal, unseal};
-use reactor_email::{auth_link, render, reserved, reserved_name, Mail};
+use reactor_email::{auth_link, fill, reserved, reserved_name, Mail};
+use reactor_identity::ProjectRef;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 pub fn mount(app: Router<AppState>) -> Router<AppState> {
     app.route(
+        "/console/v1/cluster/email",
+        get(get_cluster).put(put_cluster),
+    )
+    .route(
+        "/console/v1/projects/{pref}/email/cluster",
+        put(put_cluster_flag),
+    )
+    .route(
         "/console/v1/projects/{pref}/email",
         get(get_settings).put(put_settings),
     )
@@ -42,12 +51,21 @@ pub(crate) async fn deliver(
     to: &str,
     token: &str,
 ) -> Result<(), DeliverError> {
-    let Some(settings) = load_settings(&state.pool, project_id)
-        .await
-        .map_err(|err| {
-            tracing::error!("{err}");
-            DeliverError::Failed
-        })?
+    deliver_code(state, project_id, template, to, token, "").await
+}
+
+pub(crate) async fn deliver_code(
+    state: &AppState,
+    project_id: Uuid,
+    template: &str,
+    to: &str,
+    token: &str,
+    code: &str,
+) -> Result<(), DeliverError> {
+    let Some(settings) = resolve_mail(&state.pool, project_id).await.map_err(|err| {
+        tracing::error!("{err}");
+        DeliverError::Failed
+    })?
     else {
         return Err(DeliverError::Unconfigured);
     };
@@ -58,30 +76,14 @@ pub(crate) async fn deliver(
             DeliverError::Failed
         })?;
     let link = auth_link(&settings.link_base, token);
-    let subject = render(&subject, to, token, &link);
-    let text = render(&text, to, token, &link);
-    let html = render(&html, to, token, &link);
-    let password = if settings.password_enc.is_empty() {
-        String::new()
-    } else {
-        let key = state.issuer.seal_key();
-        String::from_utf8(unseal(key, &settings.password_enc).map_err(|err| {
-            tracing::error!("{err}");
-            DeliverError::Failed
-        })?)
-        .map_err(|err| {
-            tracing::error!("{err}");
-            DeliverError::Failed
-        })?
-    };
-    let mail = Mail {
-        host: settings.host,
-        port: settings.port as u16,
-        username: settings.username,
-        password,
-        from: settings.from_address,
-        tls: settings.tls,
-    };
+    let code = code.to_string();
+    let subject = fill(&subject, to, token, &link, &code);
+    let text = fill(&text, to, token, &link, &code);
+    let html = fill(&html, to, token, &link, &code);
+    let mail = open_mail(state.issuer.seal_key(), &settings).map_err(|err| {
+        tracing::error!("{err}");
+        DeliverError::Failed
+    })?;
     let to = to.to_string();
     let sent = tokio::task::spawn_blocking(move || {
         reactor_email::send(&mail, &to, &subject, &text, &html)
@@ -125,6 +127,68 @@ struct SettingsRow {
     link_base: String,
 }
 
+struct ClusterRow {
+    host: String,
+    port: i32,
+    username: String,
+    password_enc: String,
+    from_address: String,
+    tls: String,
+}
+
+fn open_mail(key: &[u8; 32], settings: &SettingsRow) -> Result<Mail, String> {
+    let password = if settings.password_enc.is_empty() {
+        String::new()
+    } else {
+        String::from_utf8(unseal(key, &settings.password_enc).map_err(|err| err.to_string())?)
+            .map_err(|err| err.to_string())?
+    };
+    Ok(Mail {
+        host: settings.host.clone(),
+        port: settings.port as u16,
+        username: settings.username.clone(),
+        password,
+        from: settings.from_address.clone(),
+        tls: settings.tls.clone(),
+    })
+}
+
+async fn resolve_mail(
+    pool: &sqlx::PgPool,
+    project_id: Uuid,
+) -> Result<Option<SettingsRow>, sqlx::Error> {
+    let project = load_settings(pool, project_id).await?;
+    if project
+        .as_ref()
+        .is_some_and(|row| !row.host.trim().is_empty())
+    {
+        return Ok(project);
+    }
+    let allowed: Option<bool> =
+        sqlx::query_scalar("SELECT cluster_smtp FROM reactor.projects WHERE id = $1")
+            .bind(project_id)
+            .fetch_optional(pool)
+            .await?;
+    if allowed != Some(true) {
+        return Ok(None);
+    }
+    let Some(cluster) = load_cluster(pool).await? else {
+        return Ok(None);
+    };
+    if cluster.host.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(SettingsRow {
+        host: cluster.host,
+        port: cluster.port,
+        username: cluster.username,
+        password_enc: cluster.password_enc,
+        from_address: cluster.from_address,
+        tls: cluster.tls,
+        link_base: project.map(|row| row.link_base).unwrap_or_default(),
+    }))
+}
+
 async fn load_settings(
     pool: &sqlx::PgPool,
     project_id: Uuid,
@@ -144,6 +208,24 @@ async fn load_settings(
             from_address,
             tls,
             link_base,
+        })
+    })
+}
+
+async fn load_cluster(pool: &sqlx::PgPool) -> Result<Option<ClusterRow>, sqlx::Error> {
+    sqlx::query_as::<_, (String, i32, String, String, String, String)>(
+        "SELECT host, port, username, password_enc, from_address, tls FROM reactor.cluster_email WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .map(|row| {
+        row.map(|(host, port, username, password_enc, from_address, tls)| ClusterRow {
+            host,
+            port,
+            username,
+            password_enc,
+            from_address,
+            tls,
         })
     })
 }
@@ -171,6 +253,65 @@ fn settings_json(row: Option<&SettingsRow>) -> Value {
     })
 }
 
+async fn project_mail_json(
+    pool: &sqlx::PgPool,
+    project_id: Uuid,
+    row: Option<&SettingsRow>,
+) -> Result<Value, sqlx::Error> {
+    let cluster_smtp: bool =
+        sqlx::query_scalar("SELECT cluster_smtp FROM reactor.projects WHERE id = $1")
+            .bind(project_id)
+            .fetch_one(pool)
+            .await?;
+    let cluster = load_cluster(pool).await?;
+    let project_host = row.map(|item| item.host.as_str()).unwrap_or("");
+    let cluster_host = cluster
+        .as_ref()
+        .map(|item| item.host.as_str())
+        .unwrap_or("");
+    let source = if !project_host.is_empty() {
+        "project"
+    } else if cluster_smtp && !cluster_host.is_empty() {
+        "cluster"
+    } else {
+        "none"
+    };
+    let cluster_from = if source == "cluster" {
+        cluster
+            .as_ref()
+            .map(|item| item.from_address.as_str())
+            .unwrap_or("")
+    } else {
+        ""
+    };
+    let mut value = settings_json(row);
+    value["cluster_smtp"] = json!(cluster_smtp);
+    value["source"] = json!(source);
+    value["cluster_from"] = json!(cluster_from);
+    Ok(value)
+}
+
+fn cluster_json(row: Option<&ClusterRow>) -> Value {
+    let Some(row) = row else {
+        return json!({
+            "host": "",
+            "port": 587,
+            "username": "",
+            "password_set": false,
+            "from_address": "",
+            "tls": "starttls",
+        });
+    };
+    json!({
+        "host": row.host,
+        "port": row.port,
+        "username": row.username,
+        "password_set": !row.password_enc.is_empty(),
+        "from_address": row.from_address,
+        "tls": row.tls,
+    })
+}
+
 async fn get_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -181,7 +322,11 @@ async fn get_settings(
     let row = load_settings(&state.pool, project.id)
         .await
         .map_err(internal)?;
-    Ok(Json(settings_json(row.as_ref())))
+    Ok(Json(
+        project_mail_json(&state.pool, project.id, row.as_ref())
+            .await
+            .map_err(internal)?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -204,55 +349,88 @@ async fn put_settings(
     let operator = require_operator(&state, &headers).await?;
     let project = require_member(&state, &operator, &pref, "admin").await?;
     let host = body.host.trim();
-    let from_address = body.from_address.trim();
-    if host.is_empty() || from_address.is_empty() || !(1..=65535).contains(&body.port) {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "host, from address, and a valid port are required",
-        ));
-    }
-    if !matches!(body.tls.as_str(), "starttls" | "tls" | "none") {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "tls must be starttls, tls, or none",
-        ));
-    }
-    let existing = load_settings(&state.pool, project.id)
+    let link_base = body.link_base.trim();
+    if host.is_empty() {
+        let port = if (1..=65535).contains(&body.port) {
+            body.port
+        } else {
+            587
+        };
+        let tls = if matches!(body.tls.as_str(), "starttls" | "tls" | "none") {
+            body.tls.as_str()
+        } else {
+            "starttls"
+        };
+        sqlx::query(
+            "INSERT INTO reactor.email_settings (project_id, host, port, username, password_enc, from_address, tls, link_base) \
+             VALUES ($1, '', $2, '', '', '', $3, $4) \
+             ON CONFLICT (project_id) DO UPDATE SET host = '', port = EXCLUDED.port, username = '', \
+             password_enc = '', from_address = '', tls = EXCLUDED.tls, link_base = EXCLUDED.link_base",
+        )
+        .bind(project.id)
+        .bind(port)
+        .bind(tls)
+        .bind(link_base)
+        .execute(&state.pool)
         .await
         .map_err(internal)?;
-    let password_enc = match body
-        .password
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(password) => seal(state.issuer.seal_key(), password.as_bytes()).map_err(internal)?,
-        None => existing
-            .as_ref()
-            .map(|row| row.password_enc.clone())
-            .unwrap_or_default(),
-    };
-    sqlx::query(
-        "INSERT INTO reactor.email_settings (project_id, host, port, username, password_enc, from_address, tls, link_base) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
-         ON CONFLICT (project_id) DO UPDATE SET host = EXCLUDED.host, port = EXCLUDED.port, username = EXCLUDED.username, \
-         password_enc = EXCLUDED.password_enc, from_address = EXCLUDED.from_address, tls = EXCLUDED.tls, link_base = EXCLUDED.link_base",
-    )
-    .bind(project.id)
-    .bind(host)
-    .bind(body.port)
-    .bind(body.username.trim())
-    .bind(&password_enc)
-    .bind(from_address)
-    .bind(&body.tls)
-    .bind(body.link_base.trim())
-    .execute(&state.pool)
-    .await
-    .map_err(internal)?;
+    } else {
+        let from_address = body.from_address.trim();
+        if from_address.is_empty() || !(1..=65535).contains(&body.port) {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "host, from address, and a valid port are required",
+            ));
+        }
+        if !matches!(body.tls.as_str(), "starttls" | "tls" | "none") {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "tls must be starttls, tls, or none",
+            ));
+        }
+        let existing = load_settings(&state.pool, project.id)
+            .await
+            .map_err(internal)?;
+        let password_enc = match body
+            .password
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(password) => {
+                seal(state.issuer.seal_key(), password.as_bytes()).map_err(internal)?
+            }
+            None => existing
+                .as_ref()
+                .map(|row| row.password_enc.clone())
+                .unwrap_or_default(),
+        };
+        sqlx::query(
+            "INSERT INTO reactor.email_settings (project_id, host, port, username, password_enc, from_address, tls, link_base) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             ON CONFLICT (project_id) DO UPDATE SET host = EXCLUDED.host, port = EXCLUDED.port, username = EXCLUDED.username, \
+             password_enc = EXCLUDED.password_enc, from_address = EXCLUDED.from_address, tls = EXCLUDED.tls, link_base = EXCLUDED.link_base",
+        )
+        .bind(project.id)
+        .bind(host)
+        .bind(body.port)
+        .bind(body.username.trim())
+        .bind(&password_enc)
+        .bind(from_address)
+        .bind(&body.tls)
+        .bind(link_base)
+        .execute(&state.pool)
+        .await
+        .map_err(internal)?;
+    }
     let row = load_settings(&state.pool, project.id)
         .await
         .map_err(internal)?;
-    Ok(Json(settings_json(row.as_ref())))
+    Ok(Json(
+        project_mail_json(&state.pool, project.id, row.as_ref())
+            .await
+            .map_err(internal)?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -275,7 +453,7 @@ async fn test_send(
             "recipient is required",
         ));
     }
-    let Some(settings) = load_settings(&state.pool, project.id)
+    let Some(settings) = resolve_mail(&state.pool, project.id)
         .await
         .map_err(internal)?
     else {
@@ -284,22 +462,7 @@ async fn test_send(
             "email is not configured",
         ));
     };
-    let password = if settings.password_enc.is_empty() {
-        String::new()
-    } else {
-        String::from_utf8(
-            unseal(state.issuer.seal_key(), &settings.password_enc).map_err(internal)?,
-        )
-        .map_err(internal)?
-    };
-    let mail = Mail {
-        host: settings.host,
-        port: settings.port as u16,
-        username: settings.username,
-        password,
-        from: settings.from_address,
-        tls: settings.tls,
-    };
+    let mail = open_mail(state.issuer.seal_key(), &settings).map_err(internal)?;
     let to = to.to_string();
     let result = tokio::task::spawn_blocking(move || {
         reactor_email::send(
@@ -322,6 +485,108 @@ async fn test_send(
     }
     record_log(&state.pool, project.id, "email", "test", 200, "").await;
     Ok(Json(json!({"ok": true})))
+}
+
+async fn get_cluster(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let _operator = require_platform_admin(&state, &headers).await?;
+    let row = load_cluster(&state.pool).await.map_err(internal)?;
+    Ok(Json(cluster_json(row.as_ref())))
+}
+
+#[derive(Deserialize)]
+struct ClusterBody {
+    host: String,
+    port: i32,
+    username: String,
+    password: Option<String>,
+    from_address: String,
+    tls: String,
+}
+
+async fn put_cluster(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ClusterBody>,
+) -> Result<Json<Value>, ApiError> {
+    let _operator = require_platform_admin(&state, &headers).await?;
+    let host = body.host.trim();
+    let from_address = body.from_address.trim();
+    if host.is_empty() || from_address.is_empty() || !(1..=65535).contains(&body.port) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "host, from address, and a valid port are required",
+        ));
+    }
+    if !matches!(body.tls.as_str(), "starttls" | "tls" | "none") {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "tls must be starttls, tls, or none",
+        ));
+    }
+    let existing = load_cluster(&state.pool).await.map_err(internal)?;
+    let password_enc = match body
+        .password
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(password) => seal(state.issuer.seal_key(), password.as_bytes()).map_err(internal)?,
+        None => existing
+            .as_ref()
+            .map(|row| row.password_enc.clone())
+            .unwrap_or_default(),
+    };
+    sqlx::query(
+        "INSERT INTO reactor.cluster_email (id, host, port, username, password_enc, from_address, tls) \
+         VALUES (1, $1, $2, $3, $4, $5, $6) \
+         ON CONFLICT (id) DO UPDATE SET host = EXCLUDED.host, port = EXCLUDED.port, username = EXCLUDED.username, \
+         password_enc = EXCLUDED.password_enc, from_address = EXCLUDED.from_address, tls = EXCLUDED.tls",
+    )
+    .bind(host)
+    .bind(body.port)
+    .bind(body.username.trim())
+    .bind(&password_enc)
+    .bind(from_address)
+    .bind(&body.tls)
+    .execute(&state.pool)
+    .await
+    .map_err(internal)?;
+    let row = load_cluster(&state.pool).await.map_err(internal)?;
+    Ok(Json(cluster_json(row.as_ref())))
+}
+
+#[derive(Deserialize)]
+struct ClusterFlag {
+    enabled: bool,
+}
+
+async fn put_cluster_flag(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(pref): Path<String>,
+    Json(body): Json<ClusterFlag>,
+) -> Result<Json<Value>, ApiError> {
+    let _operator = require_platform_admin(&state, &headers).await?;
+    let pref = ProjectRef::parse(&pref)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid ref"))?;
+    let id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM reactor.projects WHERE ref = $1")
+        .bind(pref.as_str())
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(internal)?;
+    let Some(id) = id else {
+        return Err(ApiError::not_found());
+    };
+    sqlx::query("UPDATE reactor.projects SET cluster_smtp = $1 WHERE id = $2")
+        .bind(body.enabled)
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .map_err(internal)?;
+    Ok(Json(json!({"enabled": body.enabled})))
 }
 
 async fn seed_reserved(pool: &sqlx::PgPool, project_id: Uuid) -> Result<(), sqlx::Error> {

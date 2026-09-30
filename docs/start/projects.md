@@ -3,7 +3,7 @@ title: Projects
 description: Refs, schemas, API keys, hostnames, and a dedicated database.
 ---
 
-A project is the tenant. Creating one creates a schema, grants, an anon key, and a service key.
+A project is the tenant your app talks to. Creating one creates a Postgres schema, the grants for row-level security, an anon key for clients, and a service key for deploys. The display name is only a label. The ref in the hostname and in the token is the id that isolates data, files, and functions.
 
 ## Ref and schema
 
@@ -24,7 +24,18 @@ Control tables stay in the `reactor` schema: projects, domains, API key hashes, 
 
 Keys are hashed in `reactor.api_keys`. Plaintext is returned only when a project is created or keys are rotated (`reactor keys rotate`). Rotating rewrites `.reactor/service_key` when that file exists.
 
-Send keys as `Authorization: Bearer`.
+`POST /platform/v1/projects` with the operator token returns the values once:
+
+```json
+{
+  "id": "019f0000-0000-7000-8000-000000000000",
+  "ref": "abcdefghijklmnopqrst",
+  "anon_key": "eyJ...",
+  "service_key": "eyJ..."
+}
+```
+
+Send keys as `Authorization: Bearer`. A later read of the project does not include the plaintext keys.
 
 ## Hostname
 
@@ -32,7 +43,7 @@ Project routes resolve the tenant from the host, then from the token.
 
 - `http://{ref}.apps.localhost:18000` is the local platform host. `base_domain` defaults to `apps.localhost`.
 - A custom domain is a row. After DNS verification, `GET /ask?domain=` returns 200 and the proxy may issue a certificate. Reactor does not terminate that TLS.
-- If the host and the token name different projects, the response is 403.
+- If the host and the token name different projects, the response is 403 `{ "error": "host and token project mismatch" }`.
 
 API calls can use the platform host or the API origin in `reactor.toml`, as long as the token's ref matches the host when both are present.
 
