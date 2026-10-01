@@ -331,7 +331,12 @@ pub fn router(state: AppState) -> Router {
     if all || handler == "platform" {
         app = console::mount(app);
     }
-    let app = app.with_state(state.clone());
+    let app = app
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            console::console_key_guard,
+        ))
+        .with_state(state.clone());
     http_edge::wrap(app, state)
 }
 

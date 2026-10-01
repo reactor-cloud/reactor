@@ -92,7 +92,7 @@ services:
       REACTOR_FUNCTIONS__WORKDIR: /data/functions
       REACTOR_FUNCTIONS__BUN: /usr/local/bin/bun
       REACTOR_FUNCTIONS__PUBLISHER: fake
-      REACTOR_SITES__IDLE_SECS: "2"
+      REACTOR_SITES__IDLE_SECS: "900"
       REACTOR_POSTGREST__URL: http://127.0.0.1:3000
       REACTOR_POSTGREST__DEDICATED_URL: http://127.0.0.1:3001
       REACTOR_SQL_DIR: /app/sql

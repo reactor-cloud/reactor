@@ -129,8 +129,9 @@ async fn set_db_schemas(pool: &PgPool, schemas: &[String]) -> anyhow::Result<()>
     if let Err(err) = sqlx::raw_sql(&alter).execute(pool).await {
         tracing::warn!("role schema setting failed, using postgrest config: {err:#}");
         rewrite_postgrest_schemas(&list)?;
-        return Ok(());
     }
+    // Aurora cannot ALTER ROLE, so the schema list lives in the PostgREST config file.
+    // Reload still has to run or a project created after boot stays invisible to /data.
     sqlx::raw_sql("NOTIFY pgrst, 'reload config'")
         .execute(pool)
         .await?;

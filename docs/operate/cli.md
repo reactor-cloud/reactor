@@ -18,7 +18,7 @@ brew tap reactor-cloud/reactor
 brew install reactor
 ```
 
-`v1.26.09-beta.2` builds from source and needs Rust, which Homebrew installs as a build dependency. The formula uses tag `v1.26.09-beta.2` of [reactor-cloud/reactor](https://github.com/reactor-cloud/reactor).
+`v1.26.09-beta.3` builds from source and needs Rust, which Homebrew installs as a build dependency. The formula uses tag `v1.26.09-beta.3` of [reactor-cloud/reactor](https://github.com/reactor-cloud/reactor).
 
 From a clone of the server repository, at the repository root:
 

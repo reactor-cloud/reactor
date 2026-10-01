@@ -1,10 +1,11 @@
 use crate::{bearer, generate_ref, internal, reload, store_api_key, ApiError, AppState};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use reactor_auth::{hash_password, random_token, verify_password};
+use reactor_auth::{hash_password, random_token, token_hash, verify_password};
 use reactor_identity::ProjectRef;
 use reactor_sites::{expected_txt, txt_matches, verification_name};
 use serde::Deserialize;
@@ -22,6 +23,8 @@ pub fn mount(app: Router<AppState>) -> Router<AppState> {
         .route("/console/v1/setup/restart", post(restart_setup))
         .route("/console/v1/login", post(login))
         .route("/console/v1/me", get(me))
+        .route("/console/v1/keys", get(list_keys).post(create_key))
+        .route("/console/v1/keys/{id}", delete(delete_key))
         .route("/console/v1/cluster", get(cluster).post(rename_cluster))
         .route(
             "/console/v1/operators",
@@ -170,12 +173,165 @@ pub async fn record_log(
     }
 }
 
+pub(crate) fn console_key_scope(method: &str, path: &str) -> Option<&'static str> {
+    let path = path.split('?').next().unwrap_or(path);
+    if path.len() > 1 && path.ends_with('/') {
+        return None;
+    }
+    if method.eq_ignore_ascii_case("POST") && path == "/console/v1/projects" {
+        return Some("projects.create");
+    }
+    let rest = path.strip_prefix("/console/v1/projects/")?;
+    let mut parts = rest.split('/');
+    let pref = parts.next().unwrap_or("");
+    if !project_ref_ok(pref) {
+        return None;
+    }
+    let tail: Vec<&str> = parts.collect();
+    let method = method.to_ascii_uppercase();
+    match (method.as_str(), tail.as_slice()) {
+        ("GET" | "PUT", ["auth"]) => Some("auth.settings"),
+        ("GET" | "POST", ["auth", "providers"]) => Some("auth.providers"),
+        ("DELETE", ["auth", "providers", name]) if segment(name) => Some("auth.providers"),
+        ("GET" | "PUT", ["email"]) => Some("auth.email"),
+        ("POST", ["email", "test"]) => Some("auth.email"),
+        ("GET", ["email", "templates"]) => Some("auth.email"),
+        ("GET" | "PUT", ["email", "templates", name]) if segment(name) => Some("auth.email"),
+        ("POST", ["email", "templates", name, "reset"]) if segment(name) => Some("auth.email"),
+        ("GET", ["users"]) => Some("auth.users"),
+        ("GET" | "DELETE", ["users", id]) if segment(id) => Some("auth.users"),
+        ("POST", ["users", id, "password"]) if segment(id) => Some("auth.users"),
+        _ => None,
+    }
+}
+
+fn project_ref_ok(value: &str) -> bool {
+    value.len() == 20
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+}
+
+fn segment(value: &str) -> bool {
+    !value.is_empty()
+}
+
+fn project_ref_in_console_path(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/console/v1/projects/")?;
+    let pref = rest.split('/').next().unwrap_or("");
+    if project_ref_ok(pref) {
+        Some(pref)
+    } else {
+        None
+    }
+}
+
+pub(crate) async fn console_key_guard(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path().to_string();
+    if !path.starts_with("/console/v1") {
+        return next.run(request).await;
+    }
+    let Some(token) = bearer(request.headers()) else {
+        return next.run(request).await;
+    };
+    let Ok(claims) = state.issuer.decode(&token) else {
+        return next.run(request).await;
+    };
+    if claims.aud != "console-key" {
+        return next.run(request).await;
+    }
+    let Ok(operator_id) = Uuid::parse_str(&claims.sub) else {
+        return ApiError::unauthorized("console token required").into_response();
+    };
+    let row = sqlx::query_as::<_, (Uuid, Vec<String>)>(
+        "SELECT id, scopes FROM reactor.console_keys WHERE token_hash = $1 AND operator_id = $2",
+    )
+    .bind(token_hash(&token))
+    .bind(operator_id)
+    .fetch_optional(&state.pool)
+    .await;
+    let row = match row {
+        Ok(row) => row,
+        Err(err) => return internal(err).into_response(),
+    };
+    let Some((key_id, scopes)) = row else {
+        return ApiError::unauthorized("console token required").into_response();
+    };
+    let Some(scope) = console_key_scope(request.method().as_str(), &path) else {
+        return ApiError::forbidden("console key cannot call this").into_response();
+    };
+    if !scopes.iter().any(|item| item == scope) {
+        return ApiError::forbidden("console key cannot call this").into_response();
+    }
+    if let Some(pref) = project_ref_in_console_path(&path) {
+        let stamp = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT created_by_key FROM reactor.projects WHERE ref = $1",
+        )
+        .bind(pref)
+        .fetch_optional(&state.pool)
+        .await;
+        let stamp = match stamp {
+            Ok(stamp) => stamp,
+            Err(err) => return internal(err).into_response(),
+        };
+        if stamp.flatten() != Some(key_id) {
+            return ApiError::forbidden("console key cannot call this").into_response();
+        }
+    }
+    next.run(request).await
+}
+
+const KEY_SCOPES: &[&str] = &[
+    "projects.create",
+    "auth.settings",
+    "auth.providers",
+    "auth.email",
+    "auth.users",
+];
+
+fn clean_scopes(scopes: &[String]) -> Result<Vec<String>, ApiError> {
+    if scopes.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "at least one scope is required",
+        ));
+    }
+    let mut out = Vec::new();
+    for scope in scopes {
+        if !KEY_SCOPES.contains(&scope.as_str()) {
+            return Err(ApiError::new(StatusCode::BAD_REQUEST, "unknown scope"));
+        }
+        if !out.iter().any(|item: &String| item == scope) {
+            out.push(scope.clone());
+        }
+    }
+    Ok(out)
+}
+
 pub(crate) struct Operator {
     pub(crate) id: Uuid,
     pub(crate) email: String,
     #[allow(dead_code)]
     pub(crate) name: String,
     pub(crate) platform_admin: bool,
+    pub(crate) key_id: Option<Uuid>,
+    #[allow(dead_code)]
+    pub(crate) scopes: Vec<String>,
+}
+
+fn session_operator(id: Uuid, email: String, name: String, platform_admin: bool) -> Operator {
+    Operator {
+        id,
+        email,
+        name,
+        platform_admin,
+        key_id: None,
+        scopes: Vec::new(),
+    }
 }
 
 pub(crate) async fn require_operator(
@@ -187,27 +343,36 @@ pub(crate) async fn require_operator(
         .issuer
         .decode(&token)
         .map_err(|_| ApiError::unauthorized("console token required"))?;
+    let id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| ApiError::unauthorized("console token required"))?;
+    if claims.aud == "console-key" {
+        let row: Option<(Uuid, Vec<String>, Uuid, String, String, bool)> = sqlx::query_as(
+            "SELECT k.id, k.scopes, o.id, o.email, o.name, o.platform_admin \
+             FROM reactor.console_keys k \
+             JOIN reactor.operators o ON o.id = k.operator_id \
+             WHERE k.token_hash = $1 AND k.operator_id = $2",
+        )
+        .bind(token_hash(&token))
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(internal)?;
+        let Some((key_id, scopes, id, email, name, platform_admin)) = row else {
+            return Err(ApiError::unauthorized("console token required"));
+        };
+        return Ok(Operator {
+            id,
+            email,
+            name,
+            platform_admin,
+            key_id: Some(key_id),
+            scopes,
+        });
+    }
     if claims.aud != "console" {
         return Err(ApiError::unauthorized("console token required"));
     }
-    let id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| ApiError::unauthorized("console token required"))?;
-    let row: Option<(Uuid, String, String, bool)> = sqlx::query_as(
-        "SELECT id, email, name, platform_admin FROM reactor.operators WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(internal)?;
-    let Some((id, email, name, platform_admin)) = row else {
-        return Err(ApiError::unauthorized("console token required"));
-    };
-    Ok(Operator {
-        id,
-        email,
-        name,
-        platform_admin,
-    })
+    load_operator(state, id).await
 }
 
 fn rank(role: &str) -> i32 {
@@ -239,12 +404,7 @@ pub(crate) async fn load_operator(state: &AppState, id: Uuid) -> Result<Operator
     let Some((id, email, name, platform_admin)) = row else {
         return Err(ApiError::unauthorized("console token required"));
     };
-    Ok(Operator {
-        id,
-        email,
-        name,
-        platform_admin,
-    })
+    Ok(session_operator(id, email, name, platform_admin))
 }
 
 pub(crate) async fn require_member(
@@ -823,6 +983,109 @@ async fn probe(state: &AppState, url: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[derive(Deserialize)]
+struct KeyBody {
+    name: String,
+    scopes: Vec<String>,
+}
+
+fn reject_key(operator: &Operator) -> Result<(), ApiError> {
+    if operator.key_id.is_some() {
+        Err(ApiError::forbidden("console key cannot call this"))
+    } else {
+        Ok(())
+    }
+}
+
+async fn list_keys(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let operator = require_operator(&state, &headers).await?;
+    reject_key(&operator)?;
+    let rows: Vec<(Uuid, String, Vec<String>, String)> = sqlx::query_as(
+        "SELECT id, name, scopes, created_at::text FROM reactor.console_keys \
+         WHERE operator_id = $1 ORDER BY created_at",
+    )
+    .bind(operator.id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(internal)?;
+    let keys: Vec<Value> = rows
+        .into_iter()
+        .map(|(id, name, scopes, created_at)| {
+            json!({
+                "id": id,
+                "name": name,
+                "scopes": scopes,
+                "created_at": created_at,
+            })
+        })
+        .collect();
+    Ok(Json(json!(keys)))
+}
+
+async fn create_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<KeyBody>,
+) -> Result<Json<Value>, ApiError> {
+    let operator = require_operator(&state, &headers).await?;
+    reject_key(&operator)?;
+    let name = body.name.trim();
+    if name.is_empty() || name.len() > 80 {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "name is required"));
+    }
+    let scopes = clean_scopes(&body.scopes)?;
+    let id = Uuid::new_v4();
+    let token = state
+        .issuer
+        .sign_audience(
+            &operator.id.to_string(),
+            "console-key",
+            60 * 60 * 24 * 365 * 10,
+        )
+        .map_err(internal)?;
+    sqlx::query(
+        "INSERT INTO reactor.console_keys (id, operator_id, name, token_hash, scopes) \
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(id)
+    .bind(operator.id)
+    .bind(name)
+    .bind(token_hash(&token))
+    .bind(&scopes)
+    .execute(&state.pool)
+    .await
+    .map_err(internal)?;
+    Ok(Json(json!({
+        "id": id,
+        "name": name,
+        "scopes": scopes,
+        "token": token,
+    })))
+}
+
+async fn delete_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let operator = require_operator(&state, &headers).await?;
+    reject_key(&operator)?;
+    let deleted =
+        sqlx::query("DELETE FROM reactor.console_keys WHERE id = $1 AND operator_id = $2")
+            .bind(id)
+            .bind(operator.id)
+            .execute(&state.pool)
+            .await
+            .map_err(internal)?;
+    if deleted.rows_affected() == 0 {
+        return Err(ApiError::not_found());
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn list_projects(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -879,6 +1142,14 @@ async fn create_project(
     .execute(&state.pool)
     .await
     .map_err(internal)?;
+    if let Some(key_id) = operator.key_id {
+        sqlx::query("UPDATE reactor.projects SET created_by_key = $1 WHERE id = $2")
+            .bind(key_id)
+            .bind(id)
+            .execute(&state.pool)
+            .await
+            .map_err(internal)?;
+    }
     reload(&state).await?;
     Ok(Json(json!({
         "id": id,
@@ -2809,10 +3080,130 @@ fn file_response(path: &std::path::Path) -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        acceptable_function_env_key, function_env_public, load_function_env_from, migration_issue,
-        open_env, seal_env, site_env_public, site_public_url,
+        acceptable_function_env_key, console_key_scope, function_env_public,
+        load_function_env_from, migration_issue, open_env, seal_env, site_env_public,
+        site_public_url,
     };
     use uuid::Uuid;
+
+    const REF: &str = "abcdefghijklmnopqrst";
+
+    #[test]
+    fn console_key_scope_maps_the_allowlist() {
+        assert_eq!(
+            console_key_scope("POST", "/console/v1/projects"),
+            Some("projects.create")
+        );
+        assert_eq!(
+            console_key_scope("POST", &format!("/console/v1/projects/{REF}")),
+            None
+        );
+        assert_eq!(
+            console_key_scope("GET", &format!("/console/v1/projects/{REF}/auth")),
+            Some("auth.settings")
+        );
+        assert_eq!(
+            console_key_scope("PUT", &format!("/console/v1/projects/{REF}/auth")),
+            Some("auth.settings")
+        );
+        assert_eq!(
+            console_key_scope("GET", &format!("/console/v1/projects/{REF}/auth/providers")),
+            Some("auth.providers")
+        );
+        assert_eq!(
+            console_key_scope(
+                "POST",
+                &format!("/console/v1/projects/{REF}/auth/providers")
+            ),
+            Some("auth.providers")
+        );
+        assert_eq!(
+            console_key_scope(
+                "DELETE",
+                &format!("/console/v1/projects/{REF}/auth/providers/github")
+            ),
+            Some("auth.providers")
+        );
+        assert_eq!(
+            console_key_scope("GET", &format!("/console/v1/projects/{REF}/email")),
+            Some("auth.email")
+        );
+        assert_eq!(
+            console_key_scope("PUT", &format!("/console/v1/projects/{REF}/email")),
+            Some("auth.email")
+        );
+        assert_eq!(
+            console_key_scope("POST", &format!("/console/v1/projects/{REF}/email/test")),
+            Some("auth.email")
+        );
+        assert_eq!(
+            console_key_scope(
+                "GET",
+                &format!("/console/v1/projects/{REF}/email/templates")
+            ),
+            Some("auth.email")
+        );
+        assert_eq!(
+            console_key_scope(
+                "GET",
+                &format!("/console/v1/projects/{REF}/email/templates/invite")
+            ),
+            Some("auth.email")
+        );
+        assert_eq!(
+            console_key_scope(
+                "PUT",
+                &format!("/console/v1/projects/{REF}/email/templates/invite")
+            ),
+            Some("auth.email")
+        );
+        assert_eq!(
+            console_key_scope(
+                "POST",
+                &format!("/console/v1/projects/{REF}/email/templates/invite/reset")
+            ),
+            Some("auth.email")
+        );
+        assert_eq!(
+            console_key_scope("GET", &format!("/console/v1/projects/{REF}/users")),
+            Some("auth.users")
+        );
+        let user = "6b1c1a4e-2f0a-4d3b-9c11-0a9e8d7c6b5a";
+        assert_eq!(
+            console_key_scope("GET", &format!("/console/v1/projects/{REF}/users/{user}")),
+            Some("auth.users")
+        );
+        assert_eq!(
+            console_key_scope(
+                "DELETE",
+                &format!("/console/v1/projects/{REF}/users/{user}")
+            ),
+            Some("auth.users")
+        );
+        assert_eq!(
+            console_key_scope(
+                "POST",
+                &format!("/console/v1/projects/{REF}/users/{user}/password")
+            ),
+            Some("auth.users")
+        );
+        for (method, path) in [
+            ("POST", format!("/console/v1/projects/{REF}/email/cluster")),
+            ("DELETE", format!("/console/v1/projects/{REF}")),
+            ("POST", format!("/console/v1/projects/{REF}/members")),
+            ("POST", format!("/console/v1/projects/{REF}/migrations")),
+            ("POST", format!("/console/v1/projects/{REF}/keys")),
+            ("POST", "/console/v1/keys".to_string()),
+            ("GET", "/console/v1/me".to_string()),
+            ("GET", format!("/console/v1/projects/SHORT/auth")),
+            (
+                "PUT",
+                format!("/console/v1/projects/ABCDEFGHIJ1234567890/auth"),
+            ),
+        ] {
+            assert_eq!(console_key_scope(method, &path), None, "{method} {path}");
+        }
+    }
 
     #[test]
     fn migration_sql_stays_inside_the_project() {

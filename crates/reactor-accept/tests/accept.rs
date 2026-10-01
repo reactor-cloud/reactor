@@ -362,6 +362,11 @@ async fn gate_console() {
 }
 
 #[tokio::test]
+async fn gate_console_key() {
+    run_gate(console_key_gate()).await;
+}
+
+#[tokio::test]
 async fn gate_cors() {
     run_gate(cors_gate()).await;
 }
@@ -1482,6 +1487,381 @@ async fn console_login(http: &Http, email: &str, code: &str) -> anyhow::Result<S
         .as_str()
         .map(str::to_string)
         .context("console login did not return a token")
+}
+
+async fn console_key_gate() -> anyhow::Result<()> {
+    let http = live().await?;
+    let seed = create_project(&http, 18000).await?;
+    let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+    let session = console_token(&pool, &http, &seed).await?;
+    let email = format!("ops-{}@example.com", &seed.pref[..8]);
+    let operator_id: Uuid = sqlx::query_scalar("SELECT id FROM reactor.operators WHERE email = $1")
+        .bind(&email)
+        .fetch_one(&pool)
+        .await?;
+    let scopes = json!([
+        "projects.create",
+        "auth.settings",
+        "auth.providers",
+        "auth.email",
+        "auth.users"
+    ]);
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/console/v1/keys",
+            Some(&session),
+            Some(json!({"name": "factory", "scopes": scopes})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let minted: Value = serde_json::from_str(&body)?;
+    let key_id = minted["id"].as_str().context("key id")?.to_string();
+    let token = minted["token"].as_str().context("token")?.to_string();
+    assert!(!token.is_empty());
+    let (status, body) = http
+        .call(18000, None, "GET", "/console/v1/keys", Some(&session), None)
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.contains(&token), "{body}");
+    let listed: Value = serde_json::from_str(&body)?;
+    let row = listed
+        .as_array()
+        .context("key list")?
+        .iter()
+        .find(|row| row["id"] == key_id)
+        .context("minted key missing from list")?;
+    assert_eq!(row["name"], "factory");
+    assert!(row.get("token").is_none(), "{row}");
+    assert_eq!(row["scopes"], scopes);
+    for bad in [
+        json!({"name": "nope", "scopes": ["cluster.admin"]}),
+        json!({"name": "empty", "scopes": []}),
+    ] {
+        let (status, body) = http
+            .call(
+                18000,
+                None,
+                "POST",
+                "/console/v1/keys",
+                Some(&session),
+                Some(bad),
+            )
+            .await?;
+        assert_eq!(status, 400, "{body}");
+    }
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/console/v1/projects",
+            Some(&token),
+            Some(json!({"name": "Made"})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let made: Value = serde_json::from_str(&body)?;
+    let pref = made["ref"].as_str().context("ref")?.to_string();
+    let service = made["service_key"]
+        .as_str()
+        .context("service key")?
+        .to_string();
+    assert!(made["anon_key"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    let stamped: Option<Uuid> =
+        sqlx::query_scalar("SELECT created_by_key FROM reactor.projects WHERE ref = $1")
+            .bind(&pref)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(stamped.unwrap().to_string(), key_id);
+    let role: String = sqlx::query_scalar(
+        "SELECT m.role FROM reactor.memberships m \
+         JOIN reactor.projects p ON p.id = m.project_id \
+         WHERE p.ref = $1 AND m.operator_id = $2",
+    )
+    .bind(&pref)
+    .bind(operator_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(role, "owner");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            &format!("/console/v1/projects/{pref}/auth"),
+            Some(&token),
+            Some(json!({"require_email_verification": false, "require_mfa": true})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            &format!("/console/v1/projects/{pref}/email"),
+            Some(&token),
+            Some(json!({
+                "host": "mail.example.com",
+                "port": 587,
+                "username": "ops",
+                "password": "secret",
+                "from_address": "ops@example.com",
+                "tls": "starttls",
+                "link_base": "https://example.test"
+            })),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            &format!("/console/v1/projects/{pref}/auth/providers"),
+            Some(&token),
+            Some(json!({
+                "provider": "github",
+                "client_id": "cid",
+                "redirects": ["https://example.test/cb"]
+            })),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "GET",
+            &format!("/console/v1/projects/{pref}/users"),
+            Some(&token),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let project_id: Uuid = sqlx::query_scalar("SELECT id FROM reactor.projects WHERE ref = $1")
+        .bind(&pref)
+        .fetch_one(&pool)
+        .await?;
+    let user_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO reactor.users (id, project_id, email, password_hash) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(user_id)
+    .bind(project_id)
+    .bind("ada@example.com")
+    .bind("placeholder")
+    .execute(&pool)
+    .await?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            &format!("/console/v1/projects/{pref}/users/{user_id}/password"),
+            Some(&token),
+            Some(json!({"password": "long-enough"})),
+        )
+        .await?;
+    assert_eq!(status, 204, "{body}");
+    let other = create_project(&http, 18000).await?;
+    let other_id: Uuid = sqlx::query_scalar("SELECT id FROM reactor.projects WHERE ref = $1")
+        .bind(&other.pref)
+        .fetch_one(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO reactor.memberships (operator_id, project_id, role) VALUES ($1, $2, 'owner')",
+    )
+    .bind(operator_id)
+    .bind(other_id)
+    .execute(&pool)
+    .await?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            &format!("/console/v1/projects/{}/auth", other.pref),
+            Some(&token),
+            Some(json!({"require_email_verification": false, "require_mfa": false})),
+        )
+        .await?;
+    assert_eq!(status, 403, "{body}");
+    let other_stamp: Option<Uuid> =
+        sqlx::query_scalar("SELECT created_by_key FROM reactor.projects WHERE ref = $1")
+            .bind(&other.pref)
+            .fetch_one(&pool)
+            .await?;
+    assert!(other_stamp.is_none());
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/console/v1/keys",
+            Some(&session),
+            Some(json!({"name": "narrow", "scopes": ["projects.create"]})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let narrow: Value = serde_json::from_str(&body)?;
+    let narrow_token = narrow["token"]
+        .as_str()
+        .context("narrow token")?
+        .to_string();
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/console/v1/projects",
+            Some(&narrow_token),
+            Some(json!({"name": "Narrow"})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let narrow_project: Value = serde_json::from_str(&body)?;
+    let narrow_ref = narrow_project["ref"].as_str().context("narrow ref")?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            &format!("/console/v1/projects/{narrow_ref}/auth"),
+            Some(&narrow_token),
+            Some(json!({"require_email_verification": false, "require_mfa": false})),
+        )
+        .await?;
+    assert_eq!(status, 403, "{body}");
+    for (method, path, payload) in [
+        (
+            "POST",
+            "/console/v1/keys".to_string(),
+            json!({"name": "again", "scopes": ["projects.create"]}),
+        ),
+        ("DELETE", format!("/console/v1/projects/{pref}"), json!({})),
+        (
+            "POST",
+            format!("/console/v1/projects/{pref}/members"),
+            json!({"email": "dev@example.com", "name": "Dev", "password": "long-enough", "role": "developer"}),
+        ),
+        (
+            "POST",
+            format!("/console/v1/projects/{pref}/migrations"),
+            json!({"version": "0001_app.sql", "sql": "CREATE TABLE notes (id int);"}),
+        ),
+        (
+            "POST",
+            format!("/console/v1/projects/{pref}/email/cluster"),
+            json!({"enabled": true}),
+        ),
+    ] {
+        let (status, body) = http
+            .call(18000, None, method, &path, Some(&token), Some(payload))
+            .await?;
+        assert_eq!(status, 403, "{method} {path}: {body}");
+    }
+    let (status, body) = http
+        .call(18000, None, "GET", "/data/v1/notes", Some(&token), None)
+        .await?;
+    assert_eq!(status, 401, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/platform/v1/migrate",
+            Some(&token),
+            Some(json!({"all": true})),
+        )
+        .await?;
+    assert_eq!(status, 401, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&pref),
+            "POST",
+            "/platform/v1/migrate",
+            Some(&service),
+            Some(json!({"all": false})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&pref),
+            "POST",
+            "/auth/v1/invite",
+            Some(&service),
+            Some(json!({"email": "invitee@example.com"})),
+        )
+        .await?;
+    assert_ne!(status, 401, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "DELETE",
+            &format!("/console/v1/keys/{key_id}"),
+            Some(&session),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 204, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/console/v1/projects",
+            Some(&token),
+            Some(json!({"name": "After revoke"})),
+        )
+        .await?;
+    assert_eq!(status, 401, "{body}");
+    let cleared: Option<Uuid> =
+        sqlx::query_scalar("SELECT created_by_key FROM reactor.projects WHERE ref = $1")
+            .bind(&pref)
+            .fetch_one(&pool)
+            .await?;
+    assert!(cleared.is_none());
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            &format!("/console/v1/projects/{pref}/auth"),
+            Some(&session),
+            Some(json!({"require_email_verification": true, "require_mfa": false})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/console/v1/projects",
+            Some(&session),
+            Some(json!({"name": "By hand"})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let hand: Value = serde_json::from_str(&body)?;
+    let hand_ref = hand["ref"].as_str().context("hand ref")?;
+    let hand_stamp: Option<Uuid> =
+        sqlx::query_scalar("SELECT created_by_key FROM reactor.projects WHERE ref = $1")
+            .bind(hand_ref)
+            .fetch_one(&pool)
+            .await?;
+    assert!(hand_stamp.is_none());
+    Ok(())
 }
 
 async fn console_gate() -> anyhow::Result<()> {

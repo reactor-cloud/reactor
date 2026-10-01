@@ -263,6 +263,10 @@ export function Shell() {
                 <div className="text-xs font-normal text-muted-foreground">{email}</div>
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => navigate("/keys")}>
+                <KeyRound className="size-4" />
+                Service keys
+              </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={() => {
                   clearToken()

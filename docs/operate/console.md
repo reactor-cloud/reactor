@@ -23,11 +23,13 @@ An operator can belong to many projects and still have no row in `reactor.users`
 
 Console JWTs use the same Ed25519 key with `aud=console` and `role=console`. They are rejected by `/auth/v1` and `/data/v1`. Project JWTs are rejected by `/console/v1`.
 
+A console service key uses `aud=console-key`. A human session mints it from the avatar menu. The secret is shown once. `projects.create` can create projects. `auth.settings`, `auth.providers`, `auth.email`, and `auth.users` work only on projects that same key created. Revoke deletes the key and clears that stamp.
+
 An operator can enroll a TOTP authenticator or a passkey. When one is enrolled, login finishes through `/console/v1/mfa`.
 
 ## Pages
 
-Outside a project the sidebar lists Projects and, for a platform admin, Cluster and Console users. Inside a project it lists Overview, API keys, Auth, Data, Storage, Functions, and Sites, with Logs, Team, and Settings at the bottom.
+Outside a project the sidebar lists Projects and, for a platform admin, Cluster and Console users. Service keys is in the avatar menu for every operator. Inside a project it lists Overview, API keys, Auth, Data, Storage, Functions, and Sites, with Logs, Team, and Settings at the bottom.
 
 - **Overview** shows the project name, counts, and 24-hour traffic for auth, database, functions, and sites.
 - **API keys** shows the anon key and a hidden service key, with reveal, copy, and rotate. Plaintext exists only at create and rotate.

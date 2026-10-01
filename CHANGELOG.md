@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.26.09-beta.3
+
+Package manifests use `1.26.9-beta.3`. OpenAPI uses `1.26.09-beta.3`. The JavaScript, Swift, and Kotlin clients stay on `1.26.9-beta.2`.
+
+- An operator can mint a console service key from the avatar menu. The secret is shown once. The token audience is `console-key`.
+- Scopes are `projects.create`, `auth.settings`, `auth.providers`, `auth.email`, and `auth.users`. Auth scopes work only on projects that same key created. Revoke deletes the key.
+- PostgREST still reloads its schema list when Aurora rejects `ALTER ROLE`, so a project created after boot is visible to `/data`.
+
 ## v1.26.09-beta.2
 
 Package manifests use `1.26.9-beta.2`. OpenAPI and the Swift pin use `1.26.09-beta.2`.
