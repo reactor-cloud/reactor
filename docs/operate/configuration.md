@@ -67,7 +67,7 @@ dedicated = "http://127.0.0.1:3001"
 | `functions.runtime` | `bun` | `lambda` publishes user functions instead of spawning Bun |
 | `postgrest.url` | — | Where `/data/v1` proxies |
 
-`REACTOR_SQL_DIR` points at the `sql/` tree. `REACTOR_HANDLER` is set only in Lambda. `REACTOR_DNS_STUB_FILE` is a local stand-in for DNS checks.
+`REACTOR_SQL_DIR` points at the `sql/` tree. `REACTOR_HANDLER` is set only in Lambda. `REACTOR_DNS_STUB_FILE` is a local stand-in for DNS checks. When it is unset, domain verify looks up the TXT record over HTTPS.
 
 Auth mail is not in this file. SMTP credentials live in Postgres and are written from the console. The cluster has one server (host, port, username, password, From, TLS). A project has its own server plus a link base. Mail uses the project host when it is set, otherwise the cluster server when that project is allowed to use it. The password is not returned after it is saved.
 

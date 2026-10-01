@@ -27,7 +27,7 @@ use reactor_functions::{
 };
 use reactor_identity::{project_ref_from_host, Identity, ProjectRef, Role};
 use reactor_sites::{
-    content_type_for, expected_txt, safe_site_path, txt_matches, verification_name,
+    content_type_for, expected_txt, safe_site_path, txt_from_doh, txt_matches, verification_name,
 };
 use reactor_storage::{object_key, verify_signature, BlobStore, FsStore, S3Store};
 use serde::{Deserialize, Serialize};
@@ -1891,7 +1891,12 @@ async fn verify_domain(
     let Some(token) = token else {
         return Err(ApiError::not_found());
     };
-    let records = read_txt_stub(&state.config.dns_stub_file, &verification_name(&host));
+    let records = lookup_txt(
+        &state.http,
+        &state.config.dns_stub_file,
+        &verification_name(&host),
+    )
+    .await;
     if !txt_matches(&records, &token) {
         return Err(ApiError::forbidden("verification failed"));
     }
@@ -1901,6 +1906,57 @@ async fn verify_domain(
         .await
         .map_err(internal)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+const DOH_BASES: &[&str] = &[
+    "https://cloudflare-dns.com/dns-query",
+    "https://dns.google/resolve",
+];
+
+pub(crate) async fn lookup_txt(
+    http: &reqwest::Client,
+    stub: &Option<String>,
+    name: &str,
+) -> Vec<String> {
+    lookup_txt_from(http, stub, name, DOH_BASES).await
+}
+
+async fn lookup_txt_from(
+    http: &reqwest::Client,
+    stub: &Option<String>,
+    name: &str,
+    bases: &[&str],
+) -> Vec<String> {
+    if stub.is_some() {
+        return read_txt_stub(stub, name);
+    }
+    for base in bases {
+        match fetch_doh_txt(http, base, name).await {
+            Ok(records) if !records.is_empty() => return records,
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!("txt lookup failed for {name} via {base}: {err:#}");
+            }
+        }
+    }
+    Vec::new()
+}
+
+async fn fetch_doh_txt(
+    http: &reqwest::Client,
+    base: &str,
+    name: &str,
+) -> anyhow::Result<Vec<String>> {
+    let response = http
+        .get(base)
+        .header(header::ACCEPT, "application/dns-json")
+        .query(&[("name", name), ("type", "TXT")])
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await?
+        .error_for_status()?;
+    let body = response.text().await?;
+    txt_from_doh(&body).ok_or_else(|| anyhow::anyhow!("dns response was not json"))
 }
 
 fn read_txt_stub(path: &Option<String>, name: &str) -> Vec<String> {
@@ -2240,7 +2296,84 @@ pub async fn router_from_env() -> anyhow::Result<Router> {
 
 #[cfg(test)]
 mod tests {
-    use super::{lambda_env, pool_max_connections};
+    use super::{lambda_env, lookup_txt_from, pool_max_connections};
+    use reactor_sites::txt_matches;
+
+    fn local_doh(status: u16, body: &'static str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let mut stream = listener.incoming().next().unwrap().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let response = format!(
+                "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+        });
+        format!("http://{addr}/dns-query")
+    }
+
+    #[tokio::test]
+    async fn stub_wins_and_a_miss_does_not_query_dns() {
+        let dir = std::env::temp_dir().join(format!("reactor-dns-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stub.json");
+        let name = "_reactor-verify.app.example.com";
+        std::fs::write(
+            &path,
+            format!(r#"{{"{name}":"reactor-site-verification=from-stub"}}"#),
+        )
+        .unwrap();
+        let http = reqwest::Client::new();
+        let live = local_doh(
+            200,
+            r#"{"Answer":[{"type":16,"data":"\"reactor-site-verification=from-dns\""}]}"#,
+        );
+        let stub = Some(path.display().to_string());
+        let records = lookup_txt_from(&http, &stub, name, &[live.as_str()]).await;
+        assert_eq!(
+            records,
+            vec!["reactor-site-verification=from-stub".to_string()]
+        );
+        let missing = lookup_txt_from(
+            &http,
+            &stub,
+            "_reactor-verify.other.example",
+            &[live.as_str()],
+        )
+        .await;
+        assert!(missing.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn unset_stub_reads_public_txt_and_falls_back() {
+        let fail = local_doh(500, "nope");
+        let ok = local_doh(
+            200,
+            r#"{"Answer":[{"type":16,"data":"\"reactor-site-verification=from-dns\""}]}"#,
+        );
+        let http = reqwest::Client::new();
+        let records = lookup_txt_from(
+            &http,
+            &None,
+            "_reactor-verify.app.example.com",
+            &[fail.as_str(), ok.as_str()],
+        )
+        .await;
+        assert!(txt_matches(&records, "from-dns"));
+        let empty = local_doh(200, r#"{"Status":3}"#);
+        let none = lookup_txt_from(
+            &http,
+            &None,
+            "_reactor-verify.missing.example",
+            &[empty.as_str()],
+        )
+        .await;
+        assert!(none.is_empty());
+    }
 
     #[test]
     fn lambda_pool_leaves_room_for_the_agent_lock() {

@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.26.10-beta5
+
+Package manifests use `1.26.10-beta5`. The JavaScript, Swift, and Kotlin clients stay on `1.26.9-beta.2`.
+
+- The console data page lists a project's own schemas and edits a row in the selected schema.
+- Domain verify reads the TXT record over HTTPS when `REACTOR_DNS_STUB_FILE` is unset.
+
 ## v1.26.09-beta.4
 
 Package manifests use `1.26.9-beta.4`. OpenAPI uses `1.26.09-beta.4`. The JavaScript, Swift, and Kotlin clients stay on `1.26.9-beta.2`.

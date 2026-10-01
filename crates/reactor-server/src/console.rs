@@ -1,4 +1,4 @@
-use crate::{bearer, generate_ref, internal, reload, store_api_key, ApiError, AppState};
+use crate::{bearer, generate_ref, internal, pool_for, reload, store_api_key, ApiError, AppState};
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
@@ -60,6 +60,7 @@ pub fn mount(app: Router<AppState>) -> Router<AppState> {
             "/console/v1/projects/{pref}/users/{user_id}/password",
             post(set_user_password),
         )
+        .route("/console/v1/projects/{pref}/schemas", get(schemas))
         .route("/console/v1/projects/{pref}/schema", get(schema))
         .route("/console/v1/projects/{pref}/tables", post(create_table))
         .route(
@@ -1447,26 +1448,110 @@ async fn delete_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn schema(
+#[derive(Deserialize, Default)]
+struct SchemaQuery {
+    schema: Option<String>,
+}
+
+async fn data_pool(state: &AppState, project_id: Uuid) -> Result<sqlx::PgPool, ApiError> {
+    let url: Option<String> =
+        sqlx::query_scalar("SELECT database_url FROM reactor.projects WHERE id = $1")
+            .bind(project_id)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(internal)?;
+    pool_for(state, url.as_deref()).await.map_err(internal)
+}
+
+pub(crate) fn owned_schema(pref: &str, name: &str) -> bool {
+    let Ok(own) = schema_name(pref) else {
+        return false;
+    };
+    ident(name) && (name == own || name.starts_with(&format!("{own}_")))
+}
+
+async fn list_owned_schemas(pool: &sqlx::PgPool, pref: &str) -> Result<Vec<String>, ApiError> {
+    let own = schema_name(pref)?;
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT nspname FROM pg_namespace \
+         WHERE nspname = $1 OR starts_with(nspname, $2) \
+         ORDER BY nspname",
+    )
+    .bind(&own)
+    .bind(format!("{own}_"))
+    .fetch_all(pool)
+    .await
+    .map_err(internal)?;
+    Ok(names
+        .into_iter()
+        .filter(|name| owned_schema(pref, name))
+        .collect())
+}
+
+async fn resolve_schema(
+    pool: &sqlx::PgPool,
+    pref: &str,
+    requested: Option<&str>,
+) -> Result<String, ApiError> {
+    let own = schema_name(pref)?;
+    let name = requested.filter(|value| !value.is_empty()).unwrap_or(&own);
+    if !owned_schema(pref, name) {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid schema"));
+    }
+    let found: Option<String> = sqlx::query_scalar("SELECT nspname FROM pg_namespace WHERE nspname = $1")
+        .bind(name)
+        .fetch_optional(pool)
+        .await
+        .map_err(internal)?;
+    found.ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "schema not found"))
+}
+
+async fn schemas(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(pref): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let operator = require_operator(&state, &headers).await?;
     let project = require_member(&state, &operator, &pref, "developer").await?;
-    let schema = format!("proj_{}", project.pref);
+    let pool = data_pool(&state, project.id).await?;
+    let names = list_owned_schemas(&pool, &project.pref).await?;
+    let mut out = Vec::new();
+    for name in names {
+        let tables: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM information_schema.tables \
+             WHERE table_schema = $1 AND table_type = 'BASE TABLE'",
+        )
+        .bind(&name)
+        .fetch_one(&pool)
+        .await
+        .map_err(internal)?;
+        out.push(json!({ "name": name, "tables": tables }));
+    }
+    Ok(Json(json!(out)))
+}
+
+async fn schema(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(pref): Path<String>,
+    Query(query): Query<SchemaQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let operator = require_operator(&state, &headers).await?;
+    let project = require_member(&state, &operator, &pref, "developer").await?;
+    let pool = data_pool(&state, project.id).await?;
+    let schema = resolve_schema(&pool, &project.pref, query.schema.as_deref()).await?;
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT table_name FROM information_schema.tables \
          WHERE table_schema = $1 AND table_type = 'BASE TABLE' ORDER BY table_name",
     )
     .bind(&schema)
-    .fetch_all(&state.pool)
+    .fetch_all(&pool)
     .await
     .map_err(internal)?;
     let mut out = Vec::new();
     for table in tables {
-        let columns = column_types(&state.pool, &schema, &table).await?;
-        let pk = primary_key(&state.pool, &schema, &table).await?;
+        let columns = column_types(&pool, &schema, &table).await?;
+        let pk = primary_key(&pool, &schema, &table).await?;
         out.push(json!({
             "name": table,
             "primary_key": pk.as_ref().map(|(name, _)| name),
@@ -1493,11 +1578,13 @@ async fn create_table(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(pref): Path<String>,
+    Query(query): Query<SchemaQuery>,
     Json(body): Json<CreateTable>,
 ) -> Result<StatusCode, ApiError> {
     let operator = require_operator(&state, &headers).await?;
     let project = require_member(&state, &operator, &pref, "admin").await?;
-    let schema = schema_name(&project.pref)?;
+    let pool = data_pool(&state, project.id).await?;
+    let schema = resolve_schema(&pool, &project.pref, query.schema.as_deref()).await?;
     if !ident(&body.name) {
         return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid table"));
     }
@@ -1536,7 +1623,7 @@ async fn create_table(
         defs = defs.join(", "),
     );
     sqlx::raw_sql(&sql)
-        .execute(&state.pool)
+        .execute(&pool)
         .await
         .map_err(internal)?;
     reload(&state).await?;
@@ -1730,6 +1817,7 @@ struct SearchQuery {
     offset: Option<i64>,
     kind: Option<String>,
     name: Option<String>,
+    schema: Option<String>,
 }
 
 async fn table_rows(
@@ -1740,11 +1828,15 @@ async fn table_rows(
 ) -> Result<Json<Value>, ApiError> {
     let operator = require_operator(&state, &headers).await?;
     let project = require_member(&state, &operator, &pref, "developer").await?;
-    let schema = checked_table(&project.pref, &table)?;
+    let pool = data_pool(&state, project.id).await?;
+    let schema = resolve_schema(&pool, &project.pref, query.schema.as_deref()).await?;
+    if !ident(&table) {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid table"));
+    }
     let q = query.q.unwrap_or_default();
     let limit = query.limit.unwrap_or(100).clamp(1, 100);
     let offset = query.offset.unwrap_or(0).max(0);
-    let order = match primary_key(&state.pool, &schema, &table).await? {
+    let order = match primary_key(&pool, &schema, &table).await? {
         Some((pk, _)) if !pk.contains('"') => format!(" ORDER BY t.\"{pk}\""),
         _ => String::new(),
     };
@@ -1753,7 +1845,7 @@ async fn table_rows(
         "SELECT count(*) FROM \"{schema}\".\"{table}\" t {filter}"
     ))
     .bind(&q)
-    .fetch_one(&state.pool)
+    .fetch_one(&pool)
     .await
     .map_err(internal)?;
     let rows: Vec<Value> = sqlx::query_scalar(&format!(
@@ -1762,7 +1854,7 @@ async fn table_rows(
     .bind(&q)
     .bind(limit)
     .bind(offset)
-    .fetch_all(&state.pool)
+    .fetch_all(&pool)
     .await
     .map_err(internal)?;
     Ok(Json(json!({ "rows": rows, "total": total })))
@@ -1777,12 +1869,17 @@ async fn insert_row(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((pref, table)): Path<(String, String)>,
+    Query(query): Query<SchemaQuery>,
     Json(body): Json<RowValues>,
 ) -> Result<StatusCode, ApiError> {
     let operator = require_operator(&state, &headers).await?;
     let project = require_member(&state, &operator, &pref, "admin").await?;
-    let schema = checked_table(&project.pref, &table)?;
-    let columns = column_types(&state.pool, &schema, &table).await?;
+    let pool = data_pool(&state, project.id).await?;
+    let schema = resolve_schema(&pool, &project.pref, query.schema.as_deref()).await?;
+    if !ident(&table) {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid table"));
+    }
+    let columns = column_types(&pool, &schema, &table).await?;
     let mut names = Vec::new();
     let mut casts = Vec::new();
     let mut values = Vec::new();
@@ -1809,11 +1906,7 @@ async fn insert_row(
             casts.join(", ")
         )
     };
-    let mut query = sqlx::query(&sql);
-    for value in &values {
-        query = query.bind(value);
-    }
-    query.execute(&state.pool).await.map_err(internal)?;
+    exec_in_schema(&pool, &schema, &sql, &values).await?;
     Ok(StatusCode::CREATED)
 }
 
@@ -1828,18 +1921,23 @@ async fn update_row(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((pref, table)): Path<(String, String)>,
+    Query(query): Query<SchemaQuery>,
     Json(body): Json<CellUpdate>,
 ) -> Result<StatusCode, ApiError> {
     let operator = require_operator(&state, &headers).await?;
     let project = require_member(&state, &operator, &pref, "admin").await?;
-    let schema = checked_table(&project.pref, &table)?;
-    let (pk, pk_ty) = primary_key(&state.pool, &schema, &table)
+    let pool = data_pool(&state, project.id).await?;
+    let schema = resolve_schema(&pool, &project.pref, query.schema.as_deref()).await?;
+    if !ident(&table) {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid table"));
+    }
+    let (pk, pk_ty) = primary_key(&pool, &schema, &table)
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "table has no single primary key"))?;
     if !ident(&body.column) || body.column == pk {
         return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid column"));
     }
-    let columns = column_types(&state.pool, &schema, &table).await?;
+    let columns = column_types(&pool, &schema, &table).await?;
     let ty = columns
         .iter()
         .find(|(name, _)| name == &body.column)
@@ -1852,13 +1950,14 @@ async fn update_row(
         "UPDATE \"{schema}\".\"{table}\" SET \"{}\" = $1::{cast} WHERE \"{pk}\" = $2::{pk_cast}",
         body.column
     );
-    let updated = sqlx::query(&sql)
-        .bind(json_text(&body.value))
-        .bind(&body.pk)
-        .execute(&state.pool)
-        .await
-        .map_err(internal)?;
-    if updated.rows_affected() == 0 {
+    let updated = exec_in_schema(
+        &pool,
+        &schema,
+        &sql,
+        &[json_text(&body.value), body.pk.clone()],
+    )
+    .await?;
+    if updated == 0 {
         return Err(ApiError::not_found());
     }
     Ok(StatusCode::NO_CONTENT)
@@ -1873,22 +1972,23 @@ async fn delete_row(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((pref, table)): Path<(String, String)>,
+    Query(query): Query<SchemaQuery>,
     Json(body): Json<RowKey>,
 ) -> Result<StatusCode, ApiError> {
     let operator = require_operator(&state, &headers).await?;
     let project = require_member(&state, &operator, &pref, "admin").await?;
-    let schema = checked_table(&project.pref, &table)?;
-    let (pk, pk_ty) = primary_key(&state.pool, &schema, &table)
+    let pool = data_pool(&state, project.id).await?;
+    let schema = resolve_schema(&pool, &project.pref, query.schema.as_deref()).await?;
+    if !ident(&table) {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid table"));
+    }
+    let (pk, pk_ty) = primary_key(&pool, &schema, &table)
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "table has no single primary key"))?;
     let pk_cast = cast_for(&pk_ty).unwrap_or("text");
     let sql = format!("DELETE FROM \"{schema}\".\"{table}\" WHERE \"{pk}\" = $1::{pk_cast}");
-    let deleted = sqlx::query(&sql)
-        .bind(&body.pk)
-        .execute(&state.pool)
-        .await
-        .map_err(internal)?;
-    if deleted.rows_affected() == 0 {
+    let deleted = exec_in_schema(&pool, &schema, &sql, &[body.pk.clone()]).await?;
+    if deleted == 0 {
         return Err(ApiError::not_found());
     }
     Ok(StatusCode::NO_CONTENT)
@@ -1939,6 +2039,31 @@ pub(crate) fn cast_for(data_type: &str) -> Option<&'static str> {
         "numeric" => Some("numeric"),
         _ => None,
     }
+}
+
+async fn exec_in_schema(
+    pool: &sqlx::PgPool,
+    schema: &str,
+    sql: &str,
+    values: &[String],
+) -> Result<u64, ApiError> {
+    let mut tx = pool.begin().await.map_err(internal)?;
+    if let Err(err) = sqlx::query(&format!("SET LOCAL search_path TO \"{schema}\""))
+        .execute(&mut *tx)
+        .await
+    {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, pg_text(err)));
+    }
+    let mut query = sqlx::query(sql);
+    for value in values {
+        query = query.bind(value);
+    }
+    let result = match query.execute(&mut *tx).await {
+        Ok(result) => result,
+        Err(err) => return Err(ApiError::new(StatusCode::BAD_REQUEST, pg_text(err))),
+    };
+    tx.commit().await.map_err(internal)?;
+    Ok(result.rows_affected())
 }
 
 pub(crate) fn json_text(value: &Value) -> String {
@@ -2669,7 +2794,12 @@ async fn verify_site_domain(
     let Some(token) = token else {
         return Err(ApiError::not_found());
     };
-    let records = crate::read_txt_stub(&state.config.dns_stub_file, &verification_name(&host));
+    let records = crate::lookup_txt(
+        &state.http,
+        &state.config.dns_stub_file,
+        &verification_name(&host),
+    )
+    .await;
     if !txt_matches(&records, &token) {
         return Err(ApiError::forbidden("verification failed"));
     }
@@ -3083,12 +3213,24 @@ fn file_response(path: &std::path::Path) -> Response {
 mod tests {
     use super::{
         acceptable_function_env_key, console_key_scope, function_env_public,
-        load_function_env_from, migration_issue, open_env, seal_env, site_env_public,
+        load_function_env_from, migration_issue, open_env, owned_schema, seal_env, site_env_public,
         site_public_url,
     };
     use uuid::Uuid;
 
     const REF: &str = "abcdefghijklmnopqrst";
+
+    #[test]
+    fn project_schema_stays_on_that_project() {
+        let pref = "abcdefghijklmnopqrst";
+        assert!(owned_schema(pref, "proj_abcdefghijklmnopqrst"));
+        assert!(owned_schema(pref, "proj_abcdefghijklmnopqrst_billing"));
+        assert!(!owned_schema(pref, "proj_zzzzzzzzzzzzzzzzzzzz"));
+        assert!(!owned_schema(pref, "public"));
+        assert!(!owned_schema(pref, "reactor"));
+        assert!(!owned_schema(pref, "reactor_api"));
+        assert!(!owned_schema(pref, "proj_abcdefghijklmnopqrst;drop"));
+    }
 
     #[test]
     fn console_key_scope_maps_the_allowlist() {

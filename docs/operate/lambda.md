@@ -70,7 +70,7 @@ Outputs are `ApiUrl`, `AlbDns`, and `BunLayerArn`. `GET /health` on both URLs is
 
 The first Fargate tasks can exit with `Name or service not known` while Aurora's hostname is still propagating. The service retries. A later task logs `listening on 0.0.0.0:8000`. Aurora's master user cannot `ALTER ROLE authenticator SET pgrst.db_schemas`. The server logs that warning and writes the schema list into the PostgREST config instead. That is expected on Aurora.
 
-Pushing a new image onto a tag that a live task definition still references does not roll that service until something starts new tasks. Deploy a live stack with an image digest when the tag must stay put.
+Pushing a new image onto a tag that a live task definition still references does not roll that service until something starts new tasks. A live roll sets `ImageUri` on the existing stack. The steps for aws1, sw1, and Fly, including the arm64 manifest check, are in `deploy/clusters.md` in the server repository.
 
 ## Domain
 

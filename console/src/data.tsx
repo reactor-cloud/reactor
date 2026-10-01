@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react"
-import { useNavigate, useOutletContext, useParams } from "react-router-dom"
+import { useNavigate, useOutletContext, useParams, useSearchParams } from "react-router-dom"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api } from "@/lib/api"
@@ -8,44 +8,98 @@ import { ChevronLeft, ChevronRight, Plus, X } from "lucide-react"
 
 type Column = { name: string; type: string }
 type TableInfo = { name: string; primary_key: string | null; columns: Column[] }
+type SchemaInfo = { name: string; tables: number }
 
 const types = ["text", "uuid", "integer", "bigint", "boolean", "timestamptz", "jsonb", "numeric"]
 
+function ownSchema(ref: string) {
+  return `proj_${ref}`
+}
+
+function schemaSearch(ref: string, schema: string) {
+  return schema && schema !== ownSchema(ref) ? `?schema=${encodeURIComponent(schema)}` : ""
+}
+
 export function Data() {
   const { ref = "", table = "" } = useParams()
+  const [params] = useSearchParams()
   const navigate = useNavigate()
   const { role } = useOutletContext<ConsoleContext>()
   const canEdit = role === "owner" || role === "admin"
+  const [schemas, setSchemas] = useState<SchemaInfo[]>([])
   const [tables, setTables] = useState<TableInfo[]>([])
-  const [open, setOpen] = useState<string[]>(() => tabs(ref))
+  const [open, setOpen] = useState<string[]>([])
   const [creating, setCreating] = useState(false)
   const [filter, setFilter] = useState("")
   const [columns, setColumns] = useState<{ name: string; type: string }[]>([{ name: "", type: "text" }])
   const [error, setError] = useState("")
+  const [listRevision, setListRevision] = useState(0)
+  const requested = params.get("schema") || ""
+  const selected = schemas.some((item) => item.name === requested)
+    ? requested
+    : schemas.find((item) => item.name === ownSchema(ref))?.name || schemas[0]?.name || ""
+
+  useEffect(() => {
+    api<SchemaInfo[]>(`/console/v1/projects/${ref}/schemas`)
+      .then((body) => {
+        setSchemas(body)
+        setError("")
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : "schemas failed"))
+  }, [ref])
 
   function load() {
-    api<TableInfo[]>(`/console/v1/projects/${ref}/schema`).then(setTables)
+    setListRevision((value) => value + 1)
   }
-  useEffect(load, [ref])
+
   useEffect(() => {
-    if (!table || open.includes(table)) return
-    const next = [...open, table]
+    if (!selected) return
+    api<TableInfo[]>(`/console/v1/projects/${ref}/schema?schema=${encodeURIComponent(selected)}`)
+      .then((body) => {
+        setTables(body)
+        setError("")
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : "tables failed"))
+  }, [ref, selected, listRevision])
+
+  useEffect(() => {
+    if (!selected) {
+      setOpen([])
+      return
+    }
+    const stored = tabs(ref, selected)
+    if (!table || stored.includes(table)) {
+      setOpen(stored)
+      return
+    }
+    const next = [...stored, table]
     setOpen(next)
-    sessionStorage.setItem(`reactor.tabs.${ref}`, JSON.stringify(next))
-  }, [table, ref, open])
+    sessionStorage.setItem(`reactor.tabs.${ref}.${selected}`, JSON.stringify(next))
+  }, [ref, selected, table])
 
   function openTable(name: string) {
     const next = open.includes(name) ? open : [...open, name]
     setOpen(next)
-    sessionStorage.setItem(`reactor.tabs.${ref}`, JSON.stringify(next))
-    navigate(`/p/${ref}/data/${name}`)
+    sessionStorage.setItem(`reactor.tabs.${ref}.${selected}`, JSON.stringify(next))
+    navigate({ pathname: `/p/${ref}/data/${name}`, search: schemaSearch(ref, selected) })
   }
 
   function closeTable(name: string) {
     const next = open.filter((item) => item !== name)
     setOpen(next)
-    sessionStorage.setItem(`reactor.tabs.${ref}`, JSON.stringify(next))
-    if (table === name) navigate(next[0] ? `/p/${ref}/data/${next[0]}` : `/p/${ref}/data`)
+    sessionStorage.setItem(`reactor.tabs.${ref}.${selected}`, JSON.stringify(next))
+    if (table === name) {
+      navigate({
+        pathname: next[0] ? `/p/${ref}/data/${next[0]}` : `/p/${ref}/data`,
+        search: schemaSearch(ref, selected),
+      })
+    }
+  }
+
+  function chooseSchema(name: string) {
+    setOpen([])
+    setTables([])
+    navigate({ pathname: `/p/${ref}/data`, search: schemaSearch(ref, name) })
   }
 
   async function createTable(event: FormEvent<HTMLFormElement>) {
@@ -53,7 +107,7 @@ export function Data() {
     const data = new FormData(event.currentTarget)
     const spec = columns.filter((column) => column.name.trim())
     try {
-      await api(`/console/v1/projects/${ref}/tables`, {
+      await api(`/console/v1/projects/${ref}/tables?schema=${encodeURIComponent(selected)}`, {
         method: "POST",
         body: JSON.stringify({ name: data.get("name"), columns: spec }),
       })
@@ -73,6 +127,20 @@ export function Data() {
     <div className="absolute inset-0 flex min-h-0">
       <aside className="flex w-56 shrink-0 flex-col border-r">
         <div className="grid gap-2 border-b p-3">
+          <label className="grid gap-1 text-xs text-muted-foreground">
+            Schema
+            <select
+              className="h-8 truncate rounded-md border bg-background px-2 text-xs text-foreground"
+              value={selected}
+              onChange={(event) => chooseSchema(event.target.value)}
+            >
+              {schemas.map((item) => (
+                <option key={item.name} value={item.name}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+          </label>
           <Input value={filter} placeholder="Search tables" onChange={(event) => setFilter(event.target.value)} />
           {canEdit && (
             <Button variant="outline" size="sm" onClick={() => setCreating((value) => !value)}>
@@ -129,7 +197,7 @@ export function Data() {
             <button
               key={name}
               className={`flex items-center gap-1 rounded-t-md border border-b-0 px-3 py-1.5 text-sm ${name === table ? "bg-background" : "bg-muted/50 text-muted-foreground"}`}
-              onClick={() => navigate(`/p/${ref}/data/${name}`)}
+              onClick={() => navigate({ pathname: `/p/${ref}/data/${name}`, search: schemaSearch(ref, selected) })}
             >
               {name}
               <X
@@ -143,7 +211,7 @@ export function Data() {
           ))}
         </div>
         {current ? (
-          <Grid key={current.name} refId={ref} table={current} canEdit={canEdit} />
+          <Grid key={`${selected}.${current.name}`} refId={ref} schema={selected} table={current} canEdit={canEdit} />
         ) : (
           <p className="p-4 text-sm text-muted-foreground">Select a table. This view shows every row, not one user's rows.</p>
         )}
@@ -152,14 +220,14 @@ export function Data() {
   )
 }
 
-function tabs(ref: string) {
-  const raw = sessionStorage.getItem(`reactor.tabs.${ref}`)
+function tabs(ref: string, schema: string) {
+  const raw = sessionStorage.getItem(`reactor.tabs.${ref}.${schema}`)
   return raw ? (JSON.parse(raw) as string[]) : []
 }
 
 const pageSize = 50
 
-function Grid({ refId, table, canEdit }: { refId: string; table: TableInfo; canEdit: boolean }) {
+function Grid({ refId, schema, table, canEdit }: { refId: string; schema: string; table: TableInfo; canEdit: boolean }) {
   const [rows, setRows] = useState<Record<string, unknown>[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(0)
@@ -167,10 +235,11 @@ function Grid({ refId, table, canEdit }: { refId: string; table: TableInfo; canE
   const [draft, setDraft] = useState<Record<string, string> | null>(null)
   const [error, setError] = useState("")
   const [revision, setRevision] = useState(0)
+  const [openRow, setOpenRow] = useState<Record<string, unknown> | null>(null)
   const pk = table.primary_key
 
   useEffect(() => {
-    const params = new URLSearchParams({ limit: String(pageSize), offset: String(page * pageSize) })
+    const params = new URLSearchParams({ limit: String(pageSize), offset: String(page * pageSize), schema })
     if (q) params.set("q", q)
     api<{ rows: Record<string, unknown>[]; total: number }>(`/console/v1/projects/${refId}/tables/${table.name}?${params}`)
       .then((body) => {
@@ -179,29 +248,16 @@ function Grid({ refId, table, canEdit }: { refId: string; table: TableInfo; canE
         setError("")
       })
       .catch((err) => setError(err.message))
-  }, [refId, table.name, q, page, revision])
+  }, [refId, schema, table.name, q, page, revision])
 
   function reload() {
     setRevision((value) => value + 1)
   }
 
-  async function saveCell(row: Record<string, unknown>, column: string, value: string) {
-    if (!pk || !canEdit) return
-    try {
-      await api(`/console/v1/projects/${refId}/tables/${table.name}/rows`, {
-        method: "POST",
-        body: JSON.stringify({ pk: String(row[pk] ?? ""), column, value }),
-      })
-      reload()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "save failed")
-    }
-  }
-
   async function insert() {
     if (!draft) return
     try {
-      await api(`/console/v1/projects/${refId}/tables/${table.name}`, {
+      await api(`/console/v1/projects/${refId}/tables/${table.name}?schema=${encodeURIComponent(schema)}`, {
         method: "POST",
         body: JSON.stringify({ values: draft }),
       })
@@ -209,19 +265,6 @@ function Grid({ refId, table, canEdit }: { refId: string; table: TableInfo; canE
       reload()
     } catch (err) {
       setError(err instanceof Error ? err.message : "insert failed")
-    }
-  }
-
-  async function remove(row: Record<string, unknown>) {
-    if (!pk || !confirm("Delete this row?")) return
-    try {
-      await api(`/console/v1/projects/${refId}/tables/${table.name}/rows`, {
-        method: "DELETE",
-        body: JSON.stringify({ pk: String(row[pk] ?? "") }),
-      })
-      reload()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "delete failed")
     }
   }
 
@@ -257,13 +300,12 @@ function Grid({ refId, table, canEdit }: { refId: string; table: TableInfo; canE
                   <span className="ml-2 font-normal text-muted-foreground">{column.type}</span>
                 </th>
               ))}
-              {canEdit && pk && <th className="px-3 py-2" />}
             </tr>
           </thead>
           <tbody>
             {draft && (
               <tr className="border-t">
-                {table.columns.map((column) => (
+                {table.columns.map((column, index) => (
                   <td key={column.name} className="px-2 py-1">
                     {column.name === pk ? (
                       <span className="text-xs text-muted-foreground">auto</span>
@@ -273,39 +315,31 @@ function Grid({ refId, table, canEdit }: { refId: string; table: TableInfo; canE
                         onChange={(event) => setDraft({ ...draft, [column.name]: event.target.value })}
                       />
                     )}
-                  </td>
-                ))}
-                <td className="px-2">
-                  <Button size="sm" onClick={insert}>
-                    Save
-                  </Button>
-                </td>
-              </tr>
-            )}
-            {rows.map((row, index) => (
-              <tr key={String(pk ? row[pk] : index)} className="border-t">
-                {table.columns.map((column) => (
-                  <td key={column.name} className="whitespace-nowrap px-3 py-1.5 font-mono text-xs">
-                    {canEdit && column.name !== pk ? (
-                      <input
-                        className="w-full bg-transparent outline-none"
-                        defaultValue={String(row[column.name] ?? "")}
-                        onBlur={(event) => {
-                          if (event.target.value !== String(row[column.name] ?? "")) saveCell(row, column.name, event.target.value)
-                        }}
-                      />
-                    ) : (
-                      String(row[column.name] ?? "")
+                    {index === table.columns.length - 1 && (
+                      <Button size="sm" className="mt-1" onClick={insert}>
+                        Save
+                      </Button>
                     )}
                   </td>
                 ))}
-                {canEdit && pk && (
-                  <td className="px-2">
-                    <button className="text-xs text-muted-foreground hover:text-foreground" onClick={() => remove(row)}>
-                      Delete
-                    </button>
+              </tr>
+            )}
+            {rows.map((row, index) => (
+              <tr
+                key={String(pk ? row[pk] : index)}
+                role="button"
+                tabIndex={0}
+                className="cursor-pointer border-t hover:bg-muted/40"
+                onClick={() => setOpenRow(row)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") setOpenRow(row)
+                }}
+              >
+                {table.columns.map((column) => (
+                  <td key={column.name} className="whitespace-nowrap px-3 py-1.5 font-mono text-xs">
+                    {fieldText(row[column.name])}
                   </td>
-                )}
+                ))}
               </tr>
             ))}
           </tbody>
@@ -324,6 +358,212 @@ function Grid({ refId, table, canEdit }: { refId: string; table: TableInfo; canE
           </Button>
         </div>
       </div>
+      {openRow && (
+        <RowForm
+          refId={refId}
+          schema={schema}
+          table={table}
+          row={openRow}
+          canEdit={canEdit}
+          onClose={() => setOpenRow(null)}
+          onSaved={() => {
+            setOpenRow(null)
+            reload()
+          }}
+        />
+      )}
     </div>
   )
+}
+
+function fieldText(value: unknown) {
+  if (value == null) return ""
+  if (typeof value === "object") return JSON.stringify(value)
+  return String(value)
+}
+
+function RowForm({
+  refId,
+  schema,
+  table,
+  row,
+  canEdit,
+  onClose,
+  onSaved,
+}: {
+  refId: string
+  schema: string
+  table: TableInfo
+  row: Record<string, unknown>
+  canEdit: boolean
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const pk = table.primary_key
+  const [form, setForm] = useState<Record<string, string>>(() => {
+    const next: Record<string, string> = {}
+    for (const column of table.columns) next[column.name] = fieldText(row[column.name])
+    return next
+  })
+  const [error, setError] = useState("")
+  const [busy, setBusy] = useState(false)
+  const original = table.columns.map((column) => fieldText(row[column.name]))
+  const dirty = table.columns.some((column, index) => column.name !== pk && form[column.name] !== original[index])
+
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose()
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [onClose])
+
+  async function save() {
+    if (!pk || !canEdit || busy) return
+    setBusy(true)
+    setError("")
+    try {
+      for (const column of table.columns) {
+        if (column.name === pk || form[column.name] === fieldText(row[column.name])) continue
+        await api(`/console/v1/projects/${refId}/tables/${table.name}/rows?schema=${encodeURIComponent(schema)}`, {
+          method: "POST",
+          body: JSON.stringify({ pk: String(row[pk] ?? ""), column: column.name, value: form[column.name] }),
+        })
+      }
+      onSaved()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "save failed")
+      setBusy(false)
+    }
+  }
+
+  async function duplicate() {
+    if (!canEdit || busy) return
+    setBusy(true)
+    setError("")
+    const values: Record<string, string> = {}
+    for (const column of table.columns) {
+      if (column.name === pk) continue
+      if (form[column.name]) values[column.name] = form[column.name]
+    }
+    try {
+      await api(`/console/v1/projects/${refId}/tables/${table.name}?schema=${encodeURIComponent(schema)}`, {
+        method: "POST",
+        body: JSON.stringify({ values }),
+      })
+      onSaved()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "duplicate failed")
+      setBusy(false)
+    }
+  }
+
+  async function remove() {
+    if (!pk || !canEdit || busy || !confirm("Delete this row?")) return
+    setBusy(true)
+    setError("")
+    try {
+      await api(`/console/v1/projects/${refId}/tables/${table.name}/rows?schema=${encodeURIComponent(schema)}`, {
+        method: "DELETE",
+        body: JSON.stringify({ pk: String(row[pk] ?? "") }),
+      })
+      onSaved()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "delete failed")
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-label={`${table.name} row`}
+        className="flex max-h-[80vh] w-full max-w-lg flex-col rounded-lg border bg-background shadow-lg"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex h-12 shrink-0 items-center justify-between border-b px-3">
+          <span className="truncate text-sm font-medium">{table.name}</span>
+          <button type="button" aria-label="Close row" className="flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted" onClick={onClose}>
+            <X className="size-4" />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-auto p-4">
+          <div className="grid gap-3">
+            {table.columns.map((column) => (
+              <label key={column.name} className="grid gap-1">
+                <span className="text-xs text-muted-foreground">
+                  {column.name}
+                  <span className="ml-2">{column.type}</span>
+                </span>
+                <FieldControl
+                  column={column}
+                  locked={!canEdit || column.name === pk}
+                  value={form[column.name] || ""}
+                  onChange={(value) => setForm({ ...form, [column.name]: value })}
+                />
+              </label>
+            ))}
+          </div>
+          {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
+        </div>
+        {canEdit && (
+          <div className="flex shrink-0 items-center gap-2 border-t px-3 py-2">
+            {pk && (
+              <Button variant="destructive" size="sm" disabled={busy} onClick={remove}>
+                Delete
+              </Button>
+            )}
+            <Button variant="outline" size="sm" className="ml-auto" disabled={busy} onClick={duplicate}>
+              Duplicate
+            </Button>
+            {pk && (
+              <Button size="sm" disabled={busy || !dirty} onClick={save}>
+                Save
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function FieldControl({
+  column,
+  locked,
+  value,
+  onChange,
+}: {
+  column: Column
+  locked: boolean
+  value: string
+  onChange: (value: string) => void
+}) {
+  if (locked && column.name) {
+    return <p className="break-all font-mono text-xs">{value || "—"}</p>
+  }
+  if (column.type === "boolean") {
+    return (
+      <select
+        className="h-8 rounded-md border bg-background px-2 text-sm"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        <option value="">—</option>
+        <option value="true">true</option>
+        <option value="false">false</option>
+      </select>
+    )
+  }
+  if (column.type === "text" || column.type === "jsonb" || column.type === "json") {
+    return (
+      <textarea
+        className="min-h-16 w-full rounded-md border bg-background px-2 py-1 font-mono text-xs"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    )
+  }
+  return <Input value={value} onChange={(event) => onChange(event.target.value)} />
 }
