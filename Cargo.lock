@@ -3157,7 +3157,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-accept"
-version = "1.26.9-beta.3"
+version = "1.26.9-beta.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -3179,7 +3179,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-auth"
-version = "1.26.9-beta.3"
+version = "1.26.9-beta.4"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3204,7 +3204,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-builder"
-version = "1.26.9-beta.3"
+version = "1.26.9-beta.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -3219,7 +3219,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-cli"
-version = "1.26.9-beta.3"
+version = "1.26.9-beta.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -3235,7 +3235,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-email"
-version = "1.26.9-beta.3"
+version = "1.26.9-beta.4"
 dependencies = [
  "anyhow",
  "lettre",
@@ -3243,7 +3243,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-functions"
-version = "1.26.9-beta.3"
+version = "1.26.9-beta.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3261,7 +3261,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-identity"
-version = "1.26.9-beta.3"
+version = "1.26.9-beta.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -3271,7 +3271,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-server"
-version = "1.26.9-beta.3"
+version = "1.26.9-beta.4"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3313,7 +3313,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-sites"
-version = "1.26.9-beta.3"
+version = "1.26.9-beta.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -3321,7 +3321,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-storage"
-version = "1.26.9-beta.3"
+version = "1.26.9-beta.4"
 dependencies = [
  "anyhow",
  "async-trait",

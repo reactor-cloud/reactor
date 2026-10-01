@@ -341,7 +341,8 @@ async fn gate_replica() {
 async fn gate_cli() {
     run_gate(async {
         let http = live().await?;
-        cli_deploy(&http).await
+        cli_deploy(&http).await?;
+        cli_service_keys(&http).await
     })
     .await;
 }
@@ -1501,6 +1502,7 @@ async fn console_key_gate() -> anyhow::Result<()> {
         .await?;
     let scopes = json!([
         "projects.create",
+        "projects.migrate",
         "auth.settings",
         "auth.providers",
         "auth.email",
@@ -1738,6 +1740,39 @@ async fn console_key_gate() -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(status, 403, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            &format!("/console/v1/projects/{narrow_ref}/migrations"),
+            Some(&narrow_token),
+            Some(json!({"version": "0001_notes.sql", "sql": "CREATE TABLE marks (id int);"})),
+        )
+        .await?;
+    assert_eq!(status, 403, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            &format!("/console/v1/projects/{}/migrations", other.pref),
+            Some(&token),
+            Some(json!({"version": "0001_notes.sql", "sql": "CREATE TABLE marks (id int);"})),
+        )
+        .await?;
+    assert_eq!(status, 403, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            &format!("/console/v1/projects/{pref}/migrations"),
+            Some(&token),
+            Some(json!({"version": "0001_notes.sql", "sql": "CREATE TABLE marks (id int);"})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
     for (method, path, payload) in [
         (
             "POST",
@@ -1749,11 +1784,6 @@ async fn console_key_gate() -> anyhow::Result<()> {
             "POST",
             format!("/console/v1/projects/{pref}/members"),
             json!({"email": "dev@example.com", "name": "Dev", "password": "long-enough", "role": "developer"}),
-        ),
-        (
-            "POST",
-            format!("/console/v1/projects/{pref}/migrations"),
-            json!({"version": "0001_app.sql", "sql": "CREATE TABLE notes (id int);"}),
         ),
         (
             "POST",
@@ -2720,6 +2750,135 @@ async fn cli_deploy(http: &Http) -> anyhow::Result<()> {
         .await?;
     let text = page.text().await?;
     assert!(text.contains("cli-site"), "{text}");
+    Ok(())
+}
+
+fn cli_lines(output: &std::process::Output) -> anyhow::Result<Vec<(String, String)>> {
+    let text = String::from_utf8(output.stdout.clone())?;
+    if !output.status.success() {
+        anyhow::bail!("{}\n{}", text, String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(text
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once('\t')?;
+            Some((key.to_string(), value.to_string()))
+        })
+        .collect())
+}
+
+async fn cli_service_keys(http: &Http) -> anyhow::Result<()> {
+    let project = create_project(http, 18000).await?;
+    let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+    let token = console_token(&pool, http, &project).await?;
+    let home = std::env::temp_dir().join(format!("reactor-keys-{}", project.pref));
+    std::fs::create_dir_all(&home)?;
+    std::fs::write(
+        home.join("contexts.json"),
+        json!({
+            "current": "local",
+            "contexts": {
+                "local": {
+                    "url": "http://127.0.0.1:18000",
+                    "console_token": token,
+                    "email": format!("ops-{}@example.com", &project.pref[..8])
+                }
+            }
+        })
+        .to_string(),
+    )?;
+    let bin = env("REACTOR_CLI");
+    let created = Command::new(&bin)
+        .args([
+            "service-keys",
+            "create",
+            "factory",
+            "--scope",
+            "projects.create",
+            "--scope",
+            "projects.migrate",
+            "--scope",
+            "auth.users",
+        ])
+        .env("REACTOR_HOME", &home)
+        .output()?;
+    let created = cli_lines(&created)?;
+    let id = created
+        .iter()
+        .find(|(key, _)| key == "id")
+        .context("create did not print id")?
+        .1
+        .clone();
+    let secret = created
+        .iter()
+        .find(|(key, _)| key == "token")
+        .context("create did not print token")?
+        .1
+        .clone();
+    assert!(secret.split('.').count() == 3, "{secret}");
+    let listed = Command::new(&bin)
+        .args(["service-keys"])
+        .env("REACTOR_HOME", &home)
+        .output()?;
+    let listed_text = String::from_utf8(listed.stdout.clone())?;
+    assert!(listed.status.success(), "{listed_text}");
+    assert!(listed_text.contains(&id), "{listed_text}");
+    assert!(listed_text.contains("factory"), "{listed_text}");
+    assert!(
+        listed_text.contains("projects.create,projects.migrate,auth.users"),
+        "{listed_text}"
+    );
+    assert!(!listed_text.contains(&secret), "{listed_text}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/console/v1/projects",
+            Some(&secret),
+            Some(json!({"name": "from-cli"})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let created_project: Value = serde_json::from_str(&body)?;
+    let created_ref = created_project["ref"].as_str().context("cli project ref")?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            &format!("/console/v1/projects/{created_ref}/migrations"),
+            Some(&secret),
+            Some(json!({"version": "0001_notes.sql", "sql": "CREATE TABLE marks (id int);"})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let revoked = Command::new(&bin)
+        .args(["service-keys", "revoke", &id])
+        .env("REACTOR_HOME", &home)
+        .output()?;
+    let revoked = cli_lines(&revoked)?;
+    assert!(revoked
+        .iter()
+        .any(|(key, value)| key == "revoked" && value == &id));
+    let after = Command::new(&bin)
+        .args(["service-keys"])
+        .env("REACTOR_HOME", &home)
+        .output()?;
+    let after_text = String::from_utf8(after.stdout)?;
+    assert!(after.status.success(), "{after_text}");
+    assert!(!after_text.contains(&id), "{after_text}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/console/v1/projects",
+            Some(&secret),
+            Some(json!({"name": "after-revoke"})),
+        )
+        .await?;
+    assert_eq!(status, 401, "{body}");
     Ok(())
 }
 

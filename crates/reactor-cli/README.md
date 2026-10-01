@@ -34,6 +34,7 @@ A password flag or `REACTOR_PASSWORD` skips the prompt.
 | `projects` | List projects you can open |
 | `link` | Write `reactor.toml` for a project you already have |
 | `keys rotate` | Print a new anon and service key |
+| `service-keys` | List, create, or revoke console service keys |
 | `db migrate --all` | Apply control-plane SQL. `--dry-run` only lists refs |
 | `db tables` / `db rows <table>` | Read the linked project |
 | `functions` / `functions promote` / `functions demote` | List deployments, or pin and unpin a version |

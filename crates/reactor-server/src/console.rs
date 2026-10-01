@@ -201,6 +201,7 @@ pub(crate) fn console_key_scope(method: &str, path: &str) -> Option<&'static str
         ("GET", ["users"]) => Some("auth.users"),
         ("GET" | "DELETE", ["users", id]) if segment(id) => Some("auth.users"),
         ("POST", ["users", id, "password"]) if segment(id) => Some("auth.users"),
+        ("POST", ["migrations"]) => Some("projects.migrate"),
         _ => None,
     }
 }
@@ -287,6 +288,7 @@ pub(crate) async fn console_key_guard(
 
 const KEY_SCOPES: &[&str] = &[
     "projects.create",
+    "projects.migrate",
     "auth.settings",
     "auth.providers",
     "auth.email",
@@ -3187,11 +3189,18 @@ mod tests {
             ),
             Some("auth.users")
         );
+        assert_eq!(
+            console_key_scope("POST", &format!("/console/v1/projects/{REF}/migrations")),
+            Some("projects.migrate")
+        );
+        assert_eq!(
+            console_key_scope("GET", &format!("/console/v1/projects/{REF}/migrations")),
+            None
+        );
         for (method, path) in [
             ("POST", format!("/console/v1/projects/{REF}/email/cluster")),
             ("DELETE", format!("/console/v1/projects/{REF}")),
             ("POST", format!("/console/v1/projects/{REF}/members")),
-            ("POST", format!("/console/v1/projects/{REF}/migrations")),
             ("POST", format!("/console/v1/projects/{REF}/keys")),
             ("POST", "/console/v1/keys".to_string()),
             ("GET", "/console/v1/me".to_string()),

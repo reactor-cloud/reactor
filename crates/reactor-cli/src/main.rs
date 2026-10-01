@@ -63,6 +63,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: KeysCmd,
     },
+    /// Console service keys for the signed-in operator.
+    ServiceKeys {
+        #[command(subcommand)]
+        cmd: Option<ServiceKeysCmd>,
+    },
     Logs,
     Users,
     Members {
@@ -102,6 +107,30 @@ enum ProjectsCmd {
 #[derive(Subcommand)]
 enum KeysCmd {
     Rotate,
+}
+
+#[derive(Subcommand)]
+enum ServiceKeysCmd {
+    /// Mint a console service key. The token is printed once.
+    Create {
+        name: String,
+        /// Scope to grant. Repeat the flag for each one.
+        #[arg(
+            long = "scope",
+            required = true,
+            value_parser = [
+                "projects.create",
+                "projects.migrate",
+                "auth.settings",
+                "auth.providers",
+                "auth.email",
+                "auth.users",
+            ]
+        )]
+        scope: Vec<String>,
+    },
+    /// Delete a console service key.
+    Revoke { id: String },
 }
 
 #[derive(Subcommand)]
@@ -247,6 +276,13 @@ async fn main() -> anyhow::Result<()> {
         },
         Cmd::Keys { cmd } => match cmd {
             KeysCmd::Rotate => rotate_keys(context).await,
+        },
+        Cmd::ServiceKeys { cmd } => match cmd {
+            None => list_service_keys(context).await,
+            Some(ServiceKeysCmd::Create { name, scope }) => {
+                create_service_key(context, &name, &scope).await
+            }
+            Some(ServiceKeysCmd::Revoke { id }) => revoke_service_key(context, &id).await,
         },
         Cmd::Logs => logs(context).await,
         Cmd::Users => users(context).await,
@@ -612,6 +648,20 @@ fn rows_of(value: &Value) -> &[Value] {
     value.as_array().map(Vec::as_slice).unwrap_or(&[])
 }
 
+fn scopes_of(value: &Value) -> String {
+    value
+        .get("scopes")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default()
+}
+
 async fn read_body(res: reqwest::Response) -> anyhow::Result<Value> {
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
@@ -864,6 +914,53 @@ async fn rotate_keys(context: Option<&str>) -> anyhow::Result<()> {
     }
     println!("anon\t{}", field(&body, "anon_key"));
     println!("service\t{service}");
+    Ok(())
+}
+
+async fn list_service_keys(context: Option<&str>) -> anyhow::Result<()> {
+    let body = console(context, Scope::Operator, "GET", "/console/v1/keys", None).await?;
+    for key in rows_of(&body) {
+        println!(
+            "{}\t{}\t{}\t{}",
+            field(key, "id"),
+            field(key, "name"),
+            scopes_of(key),
+            field(key, "created_at")
+        );
+    }
+    Ok(())
+}
+
+async fn create_service_key(
+    context: Option<&str>,
+    name: &str,
+    scopes: &[String],
+) -> anyhow::Result<()> {
+    let body = console(
+        context,
+        Scope::Operator,
+        "POST",
+        "/console/v1/keys",
+        Some(json!({ "name": name, "scopes": scopes })),
+    )
+    .await?;
+    println!("id\t{}", field(&body, "id"));
+    println!("name\t{}", field(&body, "name"));
+    println!("scopes\t{}", scopes_of(&body));
+    println!("token\t{}", field(&body, "token"));
+    Ok(())
+}
+
+async fn revoke_service_key(context: Option<&str>, id: &str) -> anyhow::Result<()> {
+    console(
+        context,
+        Scope::Operator,
+        "DELETE",
+        &format!("/console/v1/keys/{id}"),
+        None,
+    )
+    .await?;
+    println!("revoked\t{id}");
     Ok(())
 }
 

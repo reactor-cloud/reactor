@@ -23,7 +23,7 @@ An operator can belong to many projects and still have no row in `reactor.users`
 
 Console JWTs use the same Ed25519 key with `aud=console` and `role=console`. They are rejected by `/auth/v1` and `/data/v1`. Project JWTs are rejected by `/console/v1`.
 
-A console service key uses `aud=console-key`. A human session mints it from the avatar menu. The secret is shown once. `projects.create` can create projects. `auth.settings`, `auth.providers`, `auth.email`, and `auth.users` work only on projects that same key created. Revoke deletes the key and clears that stamp.
+A console service key uses `aud=console-key`. A human session mints it from the avatar menu or with `reactor service-keys`. The secret is shown once. `projects.create` can create projects. `projects.migrate`, `auth.settings`, `auth.providers`, `auth.email`, and `auth.users` work only on projects that same key created. Revoke deletes the key and clears that stamp.
 
 An operator can enroll a TOTP authenticator or a passkey. When one is enrolled, login finishes through `/console/v1/mfa`.
 

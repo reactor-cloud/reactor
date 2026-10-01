@@ -18,7 +18,7 @@ brew tap reactor-cloud/reactor
 brew install reactor
 ```
 
-`v1.26.09-beta.3` builds from source and needs Rust, which Homebrew installs as a build dependency. The formula uses tag `v1.26.09-beta.3` of [reactor-cloud/reactor](https://github.com/reactor-cloud/reactor).
+`v1.26.09-beta.4` builds from source and needs Rust, which Homebrew installs as a build dependency. The formula uses tag `v1.26.09-beta.4` of [reactor-cloud/reactor](https://github.com/reactor-cloud/reactor).
 
 From a clone of the server repository, at the repository root:
 
@@ -62,6 +62,16 @@ service: eyJ...
 ```
 
 `--link` writes `reactor.toml` and `.reactor/service_key`. `link` does the same write when you already have the key. `keys rotate` prints a new pair and rewrites `.reactor/service_key` when that file exists. The previous anon and service keys stop working.
+
+## Service keys
+
+```sh
+reactor service-keys
+reactor service-keys create factory --scope projects.create --scope auth.users
+reactor service-keys revoke <id>
+```
+
+`service-keys` lists the signed-in operator's console service keys: id, name, scopes, and created time. `create` prints the token once. Repeat `--scope` for each scope: `projects.create`, `projects.migrate`, `auth.settings`, `auth.providers`, `auth.email`, `auth.users`. `revoke` deletes that key.
 
 ## Deploy and database
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.26.09-beta.4
+
+Package manifests use `1.26.9-beta.4`. OpenAPI uses `1.26.09-beta.4`. The JavaScript, Swift, and Kotlin clients stay on `1.26.9-beta.2`.
+
+- Console service keys can apply one SQL file with `projects.migrate`, only on projects that key created.
+- `reactor service-keys` lists, creates, and revokes those keys.
+
 ## v1.26.09-beta.3
 
 Package manifests use `1.26.9-beta.3`. OpenAPI uses `1.26.09-beta.3`. The JavaScript, Swift, and Kotlin clients stay on `1.26.9-beta.2`.
