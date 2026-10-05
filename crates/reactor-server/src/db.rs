@@ -174,6 +174,7 @@ pub async fn migrate_all(
     dedicated: Option<&PgPool>,
     sql_dir: &Path,
     dedicated_url: Option<&str>,
+    seal_key: &[u8; 32],
 ) -> anyhow::Result<()> {
     let primary = primary.clone();
     let dedicated = dedicated.cloned();
@@ -198,7 +199,8 @@ pub async fn migrate_all(
             }
             None => primary.clone(),
         };
-        apply_project_owned(pool, sql_dir.clone(), id, schema).await?;
+        apply_project_owned(pool.clone(), sql_dir.clone(), id, schema).await?;
+        crate::sql::ensure_project_role(&primary, &pool, seal_key, id, &pref).await?;
     }
     sync_schemas(&primary, dedicated.as_ref()).await?;
     Ok(())

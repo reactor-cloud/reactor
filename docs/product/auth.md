@@ -57,7 +57,7 @@ The access token is an Ed25519 JWT. It expires in 15 minutes. Claims include the
 
 Magic links, recovery, invites, and email confirmation send mail through SMTP. The project server wins when its host is set. Otherwise, if a platform admin has allowed the project to use the cluster server and that host is set, mail uses the cluster server. If neither host is set, there is no mail. The From address follows the server that sends. The link base stays on the project even when the cluster server sends.
 
-Each server stores host, port (default 587), username, password, From address, and TLS: `starttls`, `tls`, or `none`. The password is write-only. A later read shows `password_set` and never the secret. Configure the project under Auth → Email. A platform admin stores the cluster server on the Cluster page and turns `cluster_smtp` on per project. Templates are `confirm_email`, `magic_link`, `recovery`, and `invite`. `confirm_email` includes `{{code}}` and `{{link}}`. You can replace a template; reset restores the built-in one.
+Each server stores host, port (default 587), username, password, From address, and TLS: `starttls`, `tls`, or `none`. The password is write-only. A later read shows `password_set` and never the secret. Configure the project under Auth → Email. A platform admin stores the cluster server on the Cluster page and turns `cluster_smtp` on per project. Templates are `confirm_email`, `magic_link`, `recovery`, `invite`, and `otp`. `confirm_email` includes `{{code}}` and `{{link}}`. `otp` includes `{{code}}`. You can replace a template; reset restores the built-in one.
 
 `POST /auth/v1/magic-link` with `{ "email" }` and the anon key. The response is always:
 
@@ -68,6 +68,19 @@ Each server stores host, port (default 587), username, password, From address, a
 A new email creates a user. The link token lasts 15 minutes. A second request for the same email within 60 seconds does not send another message.
 
 `POST /auth/v1/verify` with `{ "token" }` consumes a magic-link token, sets `email_verified_at`, and returns a session.
+
+### Email code
+
+`POST /auth/v1/otp` with `{ "email" }` and the anon key mails a 6-digit code that lasts 10 minutes. A malformed address is 400. Otherwise the response is `{ "ok": true }` for new and existing addresses alike, and never contains the code. No user is created on send. A new code replaces the previous one. A second request within 60 seconds does not send another message.
+
+`POST /auth/v1/otp/verify` with `{ "email", "code" }` returns a session. It creates a user with no password when the email is new, and returns the existing user otherwise. It sets `email_verified_at` when it is empty and never changes a password. A wrong, expired, or used code is 400 with `{ "error": "invalid or expired code" }`. Five wrong guesses burn the code.
+
+Caps return 429 `{ "error": "too many requests" }`:
+
+- 5 codes per email per hour, 10 per day.
+- 100 codes per project per hour.
+- 10 wrong guesses per email per hour. Verify is refused until the hour passes, even with a fresh code.
+- 20 sends and 30 verifies per client IP per minute.
 
 `POST /auth/v1/recover` with `{ "email" }` is also always `{ "ok": true }`, including when the email is unknown. That avoids confirming which addresses exist.
 

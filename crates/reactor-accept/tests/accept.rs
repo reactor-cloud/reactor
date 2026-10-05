@@ -1755,6 +1755,18 @@ async fn console_key_gate() -> anyhow::Result<()> {
         .call(
             18000,
             None,
+            "PUT",
+            &format!("/console/v1/projects/{narrow_ref}/email/cluster"),
+            Some(&narrow_token),
+            Some(json!({"enabled": true})),
+        )
+        .await?;
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("console key cannot call this"), "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
             "POST",
             &format!("/console/v1/projects/{}/migrations", other.pref),
             Some(&token),
@@ -1796,6 +1808,69 @@ async fn console_key_gate() -> anyhow::Result<()> {
             .await?;
         assert_eq!(status, 403, "{method} {path}: {body}");
     }
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            &format!("/console/v1/projects/{pref}/email/cluster"),
+            Some(&token),
+            Some(json!({"enabled": true})),
+        )
+        .await?;
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("platform admin required"), "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            &format!("/console/v1/projects/{}/email/cluster", other.pref),
+            Some(&token),
+            Some(json!({"enabled": true})),
+        )
+        .await?;
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("console key cannot call this"), "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            "/console/v1/cluster/email",
+            Some(&token),
+            Some(json!({
+                "host": "mailpit",
+                "port": 1025,
+                "username": "",
+                "from_address": "cluster@example.com",
+                "tls": "none"
+            })),
+        )
+        .await?;
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("console key cannot call this"), "{body}");
+    sqlx::query("UPDATE reactor.operators SET platform_admin = true WHERE id = $1")
+        .bind(operator_id)
+        .execute(&pool)
+        .await?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            &format!("/console/v1/projects/{pref}/email/cluster"),
+            Some(&token),
+            Some(json!({"enabled": true})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let enabled: bool =
+        sqlx::query_scalar("SELECT cluster_smtp FROM reactor.projects WHERE ref = $1")
+            .bind(&pref)
+            .fetch_one(&pool)
+            .await?;
+    assert!(enabled);
     let (status, body) = http
         .call(18000, None, "GET", "/data/v1/notes", Some(&token), None)
         .await?;
@@ -3580,6 +3655,579 @@ async fn gate_confirm_email() {
     .await;
 }
 
+async fn send_otp(http: &Http, project: &Keys, email: &str) -> anyhow::Result<(u16, String)> {
+    http.call(
+        18000,
+        Some(&project.pref),
+        "POST",
+        "/auth/v1/otp",
+        Some(&project.anon),
+        Some(json!({"email": email})),
+    )
+    .await
+}
+
+async fn verify_otp(
+    http: &Http,
+    project: &Keys,
+    email: &str,
+    code: &str,
+) -> anyhow::Result<(u16, String)> {
+    http.call(
+        18000,
+        Some(&project.pref),
+        "POST",
+        "/auth/v1/otp/verify",
+        Some(&project.anon),
+        Some(json!({"email": email, "code": code})),
+    )
+    .await
+}
+
+async fn otp_mail(to: &str, seen: &[&str]) -> anyhow::Result<String> {
+    for _ in 0..40 {
+        for body in mail_bodies(to).await? {
+            if let Some(code) = code_from(&body) {
+                if !seen.contains(&code.as_str()) {
+                    return Ok(code);
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    anyhow::bail!("no new code mailed to {to}")
+}
+
+fn wrong_code(code: &str) -> &'static str {
+    if code == "000000" {
+        "111111"
+    } else {
+        "000000"
+    }
+}
+
+fn no_token(status: u16, body: &str) -> anyhow::Result<()> {
+    status_is(status, 400, body)?;
+    let v: Value = serde_json::from_str(body)?;
+    if v.get("access_token").is_some() || !v["error"].is_string() {
+        anyhow::bail!("rejected verify returned {body}");
+    }
+    Ok(())
+}
+
+fn ok_only(status: u16, body: &str) -> anyhow::Result<()> {
+    status_is(status, 200, body)?;
+    if serde_json::from_str::<Value>(body)? != json!({"ok": true}) {
+        anyhow::bail!("send body was {body}");
+    }
+    Ok(())
+}
+
+async fn project_uuid(pool: &PgPool, project: &Keys) -> anyhow::Result<Uuid> {
+    Ok(
+        sqlx::query_scalar("SELECT id FROM reactor.projects WHERE ref = $1")
+            .bind(&project.pref)
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+async fn otp_rows(pool: &PgPool, project_id: Uuid, email: &str) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM reactor.auth_challenges WHERE project_id = $1 AND email = $2 AND kind = 'otp'",
+    )
+    .bind(project_id)
+    .bind(email)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn user_rows(pool: &PgPool, project_id: Uuid, email: &str) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM reactor.users WHERE project_id = $1 AND email = $2",
+    )
+    .bind(project_id)
+    .bind(email)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn backdate_otp(pool: &PgPool, project_id: Uuid, email: &str) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE reactor.auth_challenges SET created_at = created_at - interval '2 minutes' \
+         WHERE project_id = $1 AND email = $2 AND kind = 'otp'",
+    )
+    .bind(project_id)
+    .bind(email)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn seed_otp(
+    pool: &PgPool,
+    project_id: Uuid,
+    email: &str,
+    rows: i32,
+    age: &str,
+    attempts: i32,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO reactor.auth_challenges \
+         (id, project_id, email, kind, token_hash, code_hash, attempts, created_at, expires_at, consumed_at) \
+         SELECT gen_random_uuid(), $1, $2, 'otp', gen_random_uuid()::text, 'seed', $3, \
+         now() - $4::interval, now() - $4::interval + interval '10 minutes', now() \
+         FROM generate_series(1, $5)",
+    )
+    .bind(project_id)
+    .bind(email)
+    .bind(attempts)
+    .bind(age)
+    .bind(rows)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn password_token(http: &Http, project: &Keys, email: &str) -> anyhow::Result<(u16, String)> {
+    http.call(
+        18000,
+        Some(&project.pref),
+        "POST",
+        "/auth/v1/token",
+        Some(&project.anon),
+        Some(json!({"email": email, "password": "password123"})),
+    )
+    .await
+}
+
+async fn password_user(
+    pool: &PgPool,
+    project_id: Uuid,
+    email: &str,
+    verified: bool,
+) -> anyhow::Result<(Uuid, String)> {
+    let id = Uuid::new_v4();
+    let hash = reactor_auth::hash_password("password123")?;
+    sqlx::query(
+        "INSERT INTO reactor.users (id, project_id, email, password_hash, email_verified_at) \
+         VALUES ($1, $2, $3, $4, CASE WHEN $5 THEN timestamptz '2020-01-01 00:00:00+00' END)",
+    )
+    .bind(id)
+    .bind(project_id)
+    .bind(email)
+    .bind(&hash)
+    .bind(verified)
+    .execute(pool)
+    .await?;
+    Ok((id, hash))
+}
+
+#[tokio::test]
+async fn gate_otp() {
+    run_gate(otp_gate()).await;
+}
+
+async fn otp_gate() -> anyhow::Result<()> {
+    let http = live().await?;
+    let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+    let project = create_project(&http, 18000).await?;
+    let project_id = project_uuid(&pool, &project).await?;
+    let token = console_token(&pool, &http, &project).await?;
+    let tag = project.pref[..8].to_string();
+
+    let unsent = format!("nomail-{tag}@example.com");
+    let (status, body) = send_otp(&http, &project, &unsent).await?;
+    ok_only(status, &body)?;
+    assert_eq!(
+        otp_rows(&pool, project_id, &unsent).await?,
+        0,
+        "unsent code was held"
+    );
+    configure_mail(&http, &project, &token).await?;
+
+    let (status, body) = send_otp(&http, &project, "not-an-email").await?;
+    status_is(status, 400, &body)?;
+    assert!(
+        serde_json::from_str::<Value>(&body)?["error"].is_string(),
+        "{body}"
+    );
+    let users: i64 = sqlx::query_scalar("SELECT count(*) FROM reactor.users WHERE project_id = $1")
+        .bind(project_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(users, 0, "send created a user");
+
+    let ada = format!("ada-{tag}@example.com");
+    let (status, body) = send_otp(&http, &project, &ada).await?;
+    ok_only(status, &body)?;
+    assert_eq!(
+        user_rows(&pool, project_id, &ada).await?,
+        0,
+        "send created a user"
+    );
+    let first = otp_mail(&ada, &[]).await?;
+    let (stored, held_user): (Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT code_hash, user_id FROM reactor.auth_challenges WHERE project_id = $1 AND email = $2 AND kind = 'otp'",
+    )
+    .bind(project_id)
+    .bind(&ada)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored.as_deref(),
+        Some(reactor_auth::token_hash(&first).as_str())
+    );
+    assert!(held_user.is_none(), "pending code is bound to a user");
+
+    let (status, body) = send_otp(&http, &project, &ada).await?;
+    ok_only(status, &body)?;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        mail_bodies(&ada).await?.len(),
+        1,
+        "send inside 60 seconds mailed again"
+    );
+
+    let (status, body) = verify_otp(&http, &project, &ada, &first).await?;
+    status_is(status, 200, &body)?;
+    let session: Value = serde_json::from_str(&body)?;
+    let ada_id = session["user"]["id"]
+        .as_str()
+        .context("user id")?
+        .to_string();
+    assert_eq!(session["user"]["email"], ada.as_str());
+    assert!(session.get("code").is_none(), "{body}");
+    let access = session["access_token"].as_str().context("access token")?;
+    let (status, me) = http
+        .call(
+            18000,
+            Some(&project.pref),
+            "GET",
+            "/auth/v1/user",
+            Some(access),
+            None,
+        )
+        .await?;
+    status_is(status, 200, &me)?;
+    let me: Value = serde_json::from_str(&me)?;
+    assert_eq!(me["id"], ada_id.as_str(), "token sub is not the user id");
+    assert!(me["email_verified_at"].as_str().is_some(), "{me}");
+
+    let listed = |body: &str, email: &str| -> anyhow::Result<Vec<Value>> {
+        let all: Vec<Value> = serde_json::from_str(body)?;
+        Ok(all.into_iter().filter(|u| u["email"] == email).collect())
+    };
+    let users_path = format!("/console/v1/projects/{}/users", project.pref);
+    let (status, body) = http
+        .call(18000, None, "GET", &users_path, Some(&token), None)
+        .await?;
+    status_is(status, 200, &body)?;
+    let rows = listed(&body, &ada)?;
+    assert_eq!(rows.len(), 1, "{body}");
+    assert_eq!(rows[0]["id"], ada_id.as_str());
+    assert!(
+        rows[0]["email_verified_at"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty()),
+        "{body}"
+    );
+
+    let (status, body) = verify_otp(&http, &project, &ada, &first).await?;
+    no_token(status, &body)?;
+
+    backdate_otp(&pool, project_id, &ada).await?;
+    let (status, body) = send_otp(&http, &project, &format!("  {}  ", ada.to_uppercase())).await?;
+    ok_only(status, &body)?;
+    let second = otp_mail(&ada, &[&first]).await?;
+    backdate_otp(&pool, project_id, &ada).await?;
+    let (status, body) = send_otp(&http, &project, &ada).await?;
+    ok_only(status, &body)?;
+    let third = otp_mail(&ada, &[&first, &second]).await?;
+    let (status, body) = verify_otp(&http, &project, &ada, &second).await?;
+    no_token(status, &body)?;
+    let (status, body) = verify_otp(&http, &project, &ada.to_uppercase(), &third).await?;
+    status_is(status, 200, &body)?;
+    let again: Value = serde_json::from_str(&body)?;
+    assert_eq!(
+        again["user"]["id"],
+        ada_id.as_str(),
+        "second verify changed the user"
+    );
+    let (status, body) = http
+        .call(18000, None, "GET", &users_path, Some(&token), None)
+        .await?;
+    status_is(status, 200, &body)?;
+    assert_eq!(listed(&body, &ada)?.len(), 1, "{body}");
+
+    let (status, body) = password_token(&http, &project, &ada).await?;
+    status_is(status, 401, &body)?;
+    let hash: Option<String> = sqlx::query_scalar(
+        "SELECT password_hash FROM reactor.users WHERE project_id = $1 AND email = $2",
+    )
+    .bind(project_id)
+    .bind(&ada)
+    .fetch_one(&pool)
+    .await?;
+    assert!(hash.is_none(), "otp user has a password");
+
+    let bob = format!("bob-{tag}@example.com");
+    ok_only_send(&http, &project, &bob).await?;
+    let bob_code = otp_mail(&bob, &[]).await?;
+    let (status, body) = verify_otp(&http, &project, &bob, &bob_code).await?;
+    status_is(status, 200, &body)?;
+    let bob_session: Value = serde_json::from_str(&body)?;
+    assert_ne!(
+        bob_session["user"]["id"],
+        ada_id.as_str(),
+        "two emails share a user"
+    );
+
+    let cara = format!("cara-{tag}@example.com");
+    let dan = format!("dan-{tag}@example.com");
+    ok_only_send(&http, &project, &cara).await?;
+    ok_only_send(&http, &project, &dan).await?;
+    let cara_code = otp_mail(&cara, &[]).await?;
+    let dan_code = otp_mail(&dan, &[]).await?;
+    if dan_code != cara_code {
+        let (status, body) = verify_otp(&http, &project, &cara, &dan_code).await?;
+        no_token(status, &body)?;
+    }
+    let (status, body) = verify_otp(&http, &project, &cara, &cara_code).await?;
+    status_is(status, 200, &body)?;
+    let (status, body) = verify_otp(&http, &project, &dan, &dan_code).await?;
+    status_is(status, 200, &body)?;
+
+    let fay = format!("fay-{tag}@example.com");
+    ok_only_send(&http, &project, &fay).await?;
+    let fay_code = otp_mail(&fay, &[]).await?;
+    for _ in 0..5 {
+        let (status, body) = verify_otp(&http, &project, &fay, wrong_code(&fay_code)).await?;
+        no_token(status, &body)?;
+    }
+    let (status, body) = verify_otp(&http, &project, &fay, &fay_code).await?;
+    no_token(status, &body)?;
+    assert_eq!(
+        user_rows(&pool, project_id, &fay).await?,
+        0,
+        "burned code made a user"
+    );
+
+    let gus = format!("gus-{tag}@example.com");
+    ok_only_send(&http, &project, &gus).await?;
+    let gus_code = otp_mail(&gus, &[]).await?;
+    sqlx::query(
+        "UPDATE reactor.auth_challenges SET expires_at = now() - interval '1 minute' \
+         WHERE project_id = $1 AND email = $2 AND kind = 'otp'",
+    )
+    .bind(project_id)
+    .bind(&gus)
+    .execute(&pool)
+    .await?;
+    let (status, body) = verify_otp(&http, &project, &gus, &gus_code).await?;
+    no_token(status, &body)?;
+
+    let hal = format!("hal-{tag}@example.com");
+    ok_only_send(&http, &project, &hal).await?;
+    let hal_code = otp_mail(&hal, &[]).await?;
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&project.pref),
+            "POST",
+            "/auth/v1/otp/verify",
+            Some(&project.anon),
+            Some(json!({"email": hal, "code": hal_code, "password": "password123"})),
+        )
+        .await?;
+    status_is(status, 200, &body)?;
+    let (status, body) = password_token(&http, &project, &hal).await?;
+    status_is(status, 401, &body)?;
+
+    let ivy = format!("ivy-{tag}@example.com");
+    let (ivy_id, ivy_hash) = password_user(&pool, project_id, &ivy, false).await?;
+    let (status, body) = password_token(&http, &project, &ivy).await?;
+    status_is(status, 200, &body)?;
+    assert!(
+        serde_json::from_str::<Value>(&body)?
+            .get("access_token")
+            .is_none(),
+        "unverified password login returned a session: {body}"
+    );
+    ok_only_send(&http, &project, &ivy).await?;
+    let ivy_code = otp_mail(&ivy, &[]).await?;
+    let (status, body) = verify_otp(&http, &project, &ivy, &ivy_code).await?;
+    status_is(status, 200, &body)?;
+    let ivy_session: Value = serde_json::from_str(&body)?;
+    assert_eq!(ivy_session["user"]["id"], ivy_id.to_string().as_str());
+    let (hash, verified): (Option<String>, bool) = sqlx::query_as(
+        "SELECT password_hash, email_verified_at IS NOT NULL FROM reactor.users WHERE id = $1",
+    )
+    .bind(ivy_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        hash.as_deref(),
+        Some(ivy_hash.as_str()),
+        "otp changed the password"
+    );
+    assert!(verified, "otp did not verify the password user");
+    let (status, body) = password_token(&http, &project, &ivy).await?;
+    status_is(status, 200, &body)?;
+    assert!(
+        serde_json::from_str::<Value>(&body)?["access_token"].is_string(),
+        "password login broke after otp: {body}"
+    );
+
+    let jon = format!("jon-{tag}@example.com");
+    let (jon_id, _) = password_user(&pool, project_id, &jon, true).await?;
+    ok_only_send(&http, &project, &jon).await?;
+    let jon_code = otp_mail(&jon, &[]).await?;
+    let (status, body) = verify_otp(&http, &project, &jon, &jon_code).await?;
+    status_is(status, 200, &body)?;
+    let year: f64 = sqlx::query_scalar(
+        "SELECT extract(year FROM email_verified_at AT TIME ZONE 'UTC')::float8 FROM reactor.users WHERE id = $1",
+    )
+    .bind(jon_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(year, 2020.0, "otp overwrote email_verified_at");
+
+    let settings_path = format!("/console/v1/projects/{}/auth", project.pref);
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PUT",
+            &settings_path,
+            Some(&token),
+            Some(json!({"require_email_verification": true, "require_mfa": true})),
+        )
+        .await?;
+    status_is(status, 200, &body)?;
+    let kim = format!("kim-{tag}@example.com");
+    ok_only_send(&http, &project, &kim).await?;
+    let kim_code = otp_mail(&kim, &[]).await?;
+    let (status, body) = verify_otp(&http, &project, &kim, &kim_code).await?;
+    status_is(status, 200, &body)?;
+    assert!(
+        serde_json::from_str::<Value>(&body)?["access_token"].is_string(),
+        "mfa project withheld the otp session: {body}"
+    );
+
+    let capped = create_project(&http, 18000).await?;
+    let capped_id = project_uuid(&pool, &capped).await?;
+    let capped_token = console_token(&pool, &http, &capped).await?;
+    configure_mail(&http, &capped, &capped_token).await?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "GET",
+            &format!("/console/v1/projects/{}/auth", capped.pref),
+            Some(&capped_token),
+            None,
+        )
+        .await?;
+    status_is(status, 200, &body)?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&body)?["require_email_verification"],
+        true
+    );
+    let ctag = capped.pref[..8].to_string();
+
+    let eve = format!("eve-{ctag}@example.com");
+    ok_only_send(&http, &capped, &eve).await?;
+    let eve_code = otp_mail(&eve, &[]).await?;
+    let (status, body) = verify_otp(&http, &project, &eve, &eve_code).await?;
+    no_token(status, &body)?;
+
+    let lea = format!("lea-{ctag}@example.com");
+    ok_only_send(&http, &capped, &lea).await?;
+    let lea_code = otp_mail(&lea, &[]).await?;
+    backdate_otp(&pool, capped_id, &lea).await?;
+    seed_otp(&pool, capped_id, &lea, 4, "5 minutes", 0).await?;
+    let (status, body) = send_otp(&http, &capped, &lea).await?;
+    status_is(status, 429, &body)?;
+    assert!(body.contains("too many requests"), "{body}");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(mail_bodies(&lea).await?.len(), 1, "hour cap still mailed");
+    let (status, body) = verify_otp(&http, &capped, &lea, &lea_code).await?;
+    status_is(status, 200, &body)?;
+
+    let max = format!("max-{ctag}@example.com");
+    seed_otp(&pool, capped_id, &max, 10, "2 hours", 0).await?;
+    let (status, body) = send_otp(&http, &capped, &max).await?;
+    status_is(status, 429, &body)?;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(mail_bodies(&max).await?.is_empty(), "day cap still mailed");
+
+    let ned = format!("ned-{ctag}@example.com");
+    seed_otp(&pool, capped_id, &ned, 2, "5 minutes", 5).await?;
+    ok_only_send(&http, &capped, &ned).await?;
+    let ned_code = otp_mail(&ned, &[]).await?;
+    let (status, body) = verify_otp(&http, &capped, &ned, &ned_code).await?;
+    status_is(status, 429, &body)?;
+    assert!(
+        serde_json::from_str::<Value>(&body)?
+            .get("access_token")
+            .is_none(),
+        "failure cap returned a session: {body}"
+    );
+    assert_eq!(user_rows(&pool, capped_id, &ned).await?, 0);
+
+    let ip: String = sqlx::query_scalar(
+        "SELECT ip FROM reactor.auth_attempts WHERE project_id = $1 AND kind = 'otp' LIMIT 1",
+    )
+    .bind(capped_id)
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO reactor.auth_attempts (id, project_id, ip, kind) \
+         SELECT gen_random_uuid(), $1, $2, 'otp' FROM generate_series(1, 20)",
+    )
+    .bind(capped_id)
+    .bind(&ip)
+    .execute(&pool)
+    .await?;
+    let res = http
+        .client
+        .post(Http::url(18000, Some(&capped.pref), "/auth/v1/otp"))
+        .bearer_auth(&capped.anon)
+        .header("content-type", "application/json")
+        .body(json!({"email": format!("ip-{ctag}@example.com")}).to_string())
+        .send()
+        .await?;
+    assert_eq!(res.status().as_u16(), 429, "ip send cap did not trip");
+    assert!(res.headers().get("retry-after").is_some());
+
+    let busy = create_project(&http, 18000).await?;
+    let busy_id = project_uuid(&pool, &busy).await?;
+    sqlx::query(
+        "INSERT INTO reactor.auth_challenges \
+         (id, project_id, email, kind, token_hash, code_hash, created_at, expires_at, consumed_at) \
+         SELECT gen_random_uuid(), $1, 'seed-' || g || '@example.com', 'otp', gen_random_uuid()::text, 'seed', \
+         now() - interval '5 minutes', now() + interval '5 minutes', now() \
+         FROM generate_series(1, 100) g",
+    )
+    .bind(busy_id)
+    .execute(&pool)
+    .await?;
+    let (status, body) = send_otp(
+        &http,
+        &busy,
+        &format!("late-{}@example.com", &busy.pref[..8]),
+    )
+    .await?;
+    status_is(status, 429, &body)?;
+    Ok(())
+}
+
+async fn ok_only_send(http: &Http, project: &Keys, email: &str) -> anyhow::Result<()> {
+    let (status, body) = send_otp(http, project, email).await?;
+    ok_only(status, &body)
+}
+
 fn current_totp(secret: &str) -> anyhow::Result<String> {
     let bytes = totp_rs::Secret::Encoded(secret.to_string()).to_bytes()?;
     let totp = totp_rs::TOTP::new(
@@ -4046,4 +4694,721 @@ async fn gate_oauth() {
         Ok(())
     })
     .await;
+}
+
+#[tokio::test]
+async fn project_role_owns_its_schema_and_nothing_else() {
+    run_gate(project_role_gate()).await;
+}
+
+#[tokio::test]
+async fn superware_launch_sql_still_serves_the_data_api() {
+    run_gate(superware_launch_gate()).await;
+}
+
+#[tokio::test]
+async fn sql_run_is_read_only_until_asked() {
+    run_gate(sql_run_gate()).await;
+}
+
+#[tokio::test]
+async fn sql_run_requires_confirm_for_a_drop() {
+    run_gate(sql_confirm_gate()).await;
+}
+
+#[tokio::test]
+async fn revert_is_a_new_forward_migration() {
+    run_gate(revert_gate()).await;
+}
+
+#[tokio::test]
+async fn reset_database_role_kills_the_old_password() {
+    run_gate(reset_role_gate()).await;
+}
+
+async fn project_role_gate() -> anyhow::Result<()> {
+    let http = live().await?;
+    let project = create_project(&http, 18000).await?;
+    let other = create_project(&http, 18000).await?;
+    let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+    let role = format!("proj_{}_admin", project.pref);
+    let schema = format!("proj_{}", project.pref);
+    let flags: (bool, bool) =
+        sqlx::query_as("SELECT rolbypassrls, rolsuper FROM pg_roles WHERE rolname = $1")
+            .bind(&role)
+            .fetch_one(&pool)
+            .await?;
+    assert!(flags.0, "project role bypasses rls");
+    assert!(!flags.1, "project role is not superuser");
+    let owner: String = sqlx::query_scalar(
+        "SELECT r.rolname FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner WHERE n.nspname = $1",
+    )
+    .bind(&schema)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(owner, role);
+    for table in ["notes", "todos"] {
+        let owner: String = sqlx::query_scalar(
+            "SELECT r.rolname FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_roles r ON r.oid = c.relowner \
+             WHERE n.nspname = $1 AND c.relname = $2",
+        )
+        .bind(&schema)
+        .bind(table)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(owner, role, "{table}");
+    }
+    let control: String = sqlx::query_scalar(
+        "SELECT r.rolname FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         JOIN pg_roles r ON r.oid = c.relowner \
+         WHERE n.nspname = 'reactor' AND c.relname = 'projects'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(control, "reactor");
+    let reactor_usage: bool =
+        sqlx::query_scalar("SELECT has_schema_privilege($1, 'reactor', 'USAGE')")
+            .bind(&role)
+            .fetch_one(&pool)
+            .await?;
+    assert!(!reactor_usage);
+    let other_schema = format!("proj_{}", other.pref);
+    let other_usage: bool =
+        sqlx::query_scalar("SELECT has_schema_privilege($1, $2, 'USAGE')")
+            .bind(&role)
+            .bind(&other_schema)
+            .fetch_one(&pool)
+            .await?;
+    assert!(!other_usage);
+    sqlx::query(&format!("ALTER SCHEMA \"{schema}\" OWNER TO CURRENT_USER"))
+        .execute(&pool)
+        .await?;
+    sqlx::query(&format!("ALTER TABLE \"{schema}\".notes OWNER TO CURRENT_USER"))
+        .execute(&pool)
+        .await?;
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&project.pref),
+            "POST",
+            "/platform/v1/migrate",
+            Some(&project.service),
+            Some(json!({})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let owner: String = sqlx::query_scalar(
+        "SELECT r.rolname FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner WHERE n.nspname = $1",
+    )
+    .bind(&schema)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(owner, role, "sweep restores schema owner");
+    let session = console_token(&pool, &http, &project).await?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "DELETE",
+            &format!("/console/v1/projects/{}", project.pref),
+            Some(&session),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 204, "{body}");
+    let gone: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)")
+        .bind(&role)
+        .fetch_one(&pool)
+        .await?;
+    assert!(!gone, "delete drops the project role");
+    Ok(())
+}
+
+async fn console_migrate(http: &Http, token: &str, pref: &str, version: &str, sql: &str) -> anyhow::Result<(u16, String)> {
+    http.call(
+        18000,
+        None,
+        "POST",
+        &format!("/console/v1/projects/{pref}/migrations"),
+        Some(token),
+        Some(json!({"version": version, "sql": sql})),
+    )
+    .await
+}
+
+async fn superware_launch_gate() -> anyhow::Result<()> {
+    let http = live().await?;
+    let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+    let seed = create_project(&http, 18000).await?;
+    let session = console_token(&pool, &http, &seed).await?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/console/v1/keys",
+            Some(&session),
+            Some(json!({"name": "launch", "scopes": ["projects.create", "projects.migrate", "auth.settings"]})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let minted: Value = serde_json::from_str(&body)?;
+    let key = minted["token"].as_str().context("token")?.to_string();
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/console/v1/projects",
+            Some(&key),
+            Some(json!({"name": "Launch"})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let created: Value = serde_json::from_str(&body)?;
+    let project = Keys {
+        pref: created["ref"].as_str().context("ref")?.to_string(),
+        anon: created["anon_key"].as_str().context("anon")?.to_string(),
+        service: created["service_key"].as_str().context("service")?.to_string(),
+    };
+    let (status, body) = console_migrate(
+        &http,
+        &key,
+        &project.pref,
+        "0001_app.sql",
+        reactor_server::superware_launch_sql(),
+    )
+    .await?;
+    assert_eq!(status, 200, "{body}");
+    let user = signup(&http, &project).await?;
+    let (status, body) = retry_data(
+        &http,
+        &project.pref,
+        "POST",
+        "/data/v1/sw_members",
+        &project.service,
+        json!({"user_id": user.user_id, "role": "owner"}),
+    )
+    .await?;
+    assert!(status < 300, "{body}");
+    let (status, body) = retry_data(
+        &http,
+        &project.pref,
+        "POST",
+        "/data/v1/jobs",
+        &project.service,
+        json!({"title": "Launch"}),
+    )
+    .await?;
+    assert!(status < 300, "{body}");
+    let (status, body) = retry_data(
+        &http,
+        &project.pref,
+        "POST",
+        "/data/v1/sw_connections",
+        &project.service,
+        json!({"key": "stripe", "secret": "hidden"}),
+    )
+    .await?;
+    assert!(status < 300, "{body}");
+    let (status, body) = retry_data(
+        &http,
+        &project.pref,
+        "GET",
+        "/data/v1/jobs?select=title",
+        &user.access,
+        json!({}),
+    )
+    .await?;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("Launch"), "{body}");
+    let (status, body) = retry_data(
+        &http,
+        &project.pref,
+        "GET",
+        "/data/v1/sw_connection_status?select=key",
+        &user.access,
+        json!({}),
+    )
+    .await?;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("stripe"), "{body}");
+    for (version, sql) in [
+        ("0002_drop_scratch.sql", "DROP TABLE scratch;"),
+        ("0003_drop_title.sql", "ALTER TABLE jobs DROP COLUMN title;"),
+        ("0004_grant_delete.sql", "GRANT DELETE ON sw_members TO service;"),
+    ] {
+        let (status, body) = console_migrate(&http, &key, &project.pref, version, sql).await?;
+        assert_eq!(status, 200, "{version} {body}");
+    }
+    let (status, body) = console_migrate(
+        &http,
+        &key,
+        &project.pref,
+        "0005_leak.sql",
+        "CREATE TABLE reactor.notes (id int);",
+    )
+    .await?;
+    assert_eq!(status, 400, "{body}");
+    assert!(!body.contains("sql is not allowed"), "{body}");
+    assert!(body.to_ascii_lowercase().contains("permission denied"), "{body}");
+    let leaked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM reactor.schema_migrations m \
+         JOIN reactor.projects p ON p.id = m.project_id \
+         WHERE p.ref = $1 AND m.version = '0005_leak.sql'",
+    )
+    .bind(&project.pref)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(leaked, 0);
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&project.pref),
+            "POST",
+            "/platform/v1/migrate",
+            Some(&project.service),
+            Some(json!({})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    Ok(())
+}
+
+async fn post_sql(http: &Http, token: &str, pref: &str, body: Value) -> anyhow::Result<(u16, String)> {
+    http.call(
+        18000,
+        None,
+        "POST",
+        &format!("/console/v1/projects/{pref}/sql"),
+        Some(token),
+        Some(body),
+    )
+    .await
+}
+
+async fn set_role(pool: &PgPool, pref: &str, email: &str, role: &str) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE reactor.memberships m SET role = $1 \
+         FROM reactor.operators o, reactor.projects p \
+         WHERE m.operator_id = o.id AND m.project_id = p.id AND o.email = $2 AND p.ref = $3",
+    )
+    .bind(role)
+    .bind(email)
+    .bind(pref)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn sql_run_gate() -> anyhow::Result<()> {
+    let http = live().await?;
+    let project = create_project(&http, 18000).await?;
+    let other = create_project(&http, 18000).await?;
+    let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+    let session = console_token(&pool, &http, &project).await?;
+    let email = format!("ops-{}@example.com", &project.pref[..8]);
+    let (status, body) = post_sql(
+        &http,
+        &session,
+        &project.pref,
+        json!({"sql": "INSERT INTO notes (body) VALUES ('no');"}),
+    )
+    .await?;
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = post_sql(
+        &http,
+        &session,
+        &project.pref,
+        json!({"sql": "SELECT count(*)::int AS n FROM notes"}),
+    )
+    .await?;
+    assert_eq!(status, 200, "{body}");
+    let parsed: Value = serde_json::from_str(&body)?;
+    let result = &parsed["results"][0];
+    assert_eq!(result["columns"][0], "n");
+    assert_eq!(result["truncated"], false);
+    assert!(result["rows"].as_array().is_some_and(|rows| !rows.is_empty()));
+    let (status, body) = post_sql(
+        &http,
+        &session,
+        &project.pref,
+        json!({"sql": "SELECT g FROM generate_series(1, 1001) g", "read_only": true}),
+    )
+    .await?;
+    assert_eq!(status, 200, "{body}");
+    let parsed: Value = serde_json::from_str(&body)?;
+    assert_eq!(parsed["results"][0]["truncated"], true);
+    assert_eq!(parsed["results"][0]["rows"].as_array().unwrap().len(), 1000);
+    let (status, body) = post_sql(
+        &http,
+        &session,
+        &project.pref,
+        json!({"sql": "INSERT INTO notes (body) VALUES ('kept'); SELECT 1/0;", "read_only": false}),
+    )
+    .await?;
+    assert_eq!(status, 400, "{body}");
+    let count: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM \"proj_{}\".notes WHERE body = 'kept'",
+        project.pref
+    ))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(count, 0);
+    let (status, body) = post_sql(
+        &http,
+        &session,
+        &project.pref,
+        json!({"sql": "SELECT count(*) FROM reactor.projects", "read_only": true}),
+    )
+    .await?;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.to_ascii_lowercase().contains("permission denied"), "{body}");
+    let (status, body) = post_sql(
+        &http,
+        &session,
+        &project.pref,
+        json!({"sql": format!("SELECT count(*) FROM \"proj_{}\".notes", other.pref), "read_only": true}),
+    )
+    .await?;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.to_ascii_lowercase().contains("permission denied"), "{body}");
+    set_role(&pool, &project.pref, &email, "developer").await?;
+    let (status, _) = post_sql(
+        &http,
+        &session,
+        &project.pref,
+        json!({"sql": "SELECT 1"}),
+    )
+    .await?;
+    assert_eq!(status, 403);
+    set_role(&pool, &project.pref, &email, "admin").await?;
+    let (status, body) = post_sql(
+        &http,
+        &session,
+        &project.pref,
+        json!({"sql": "SELECT 1 AS n"}),
+    )
+    .await?;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/console/v1/keys",
+            Some(&session),
+            Some(json!({"name": "migrate-only", "scopes": ["projects.create", "projects.migrate"]})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let minted: Value = serde_json::from_str(&body)?;
+    let narrow = minted["token"].as_str().context("narrow")?.to_string();
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/console/v1/projects",
+            Some(&narrow),
+            Some(json!({"name": "Narrow SQL"})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let narrow_project: Value = serde_json::from_str(&body)?;
+    let narrow_ref = narrow_project["ref"].as_str().context("ref")?;
+    let (status, body) = post_sql(&http, &narrow, narrow_ref, json!({"sql": "SELECT 1"})).await?;
+    assert_eq!(status, 403, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/console/v1/keys",
+            Some(&session),
+            Some(json!({"name": "sql", "scopes": ["projects.create", "projects.sql"]})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let minted: Value = serde_json::from_str(&body)?;
+    let sql_key = minted["token"].as_str().context("sql key")?.to_string();
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/console/v1/projects",
+            Some(&sql_key),
+            Some(json!({"name": "SQL key"})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let owned: Value = serde_json::from_str(&body)?;
+    let owned_ref = owned["ref"].as_str().context("ref")?;
+    let (status, body) = post_sql(&http, &sql_key, owned_ref, json!({"sql": "SELECT 1 AS n"})).await?;
+    assert_eq!(status, 200, "{body}");
+    Ok(())
+}
+
+async fn sql_confirm_gate() -> anyhow::Result<()> {
+    let http = live().await?;
+    let project = create_project(&http, 18000).await?;
+    let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+    let session = console_token(&pool, &http, &project).await?;
+    let (status, body) = post_sql(
+        &http,
+        &session,
+        &project.pref,
+        json!({"sql": "DROP TABLE notes;", "read_only": false}),
+    )
+    .await?;
+    assert_eq!(status, 409, "{body}");
+    let parsed: Value = serde_json::from_str(&body)?;
+    assert!(parsed["warnings"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item == "drop_table")));
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'notes')",
+    )
+    .bind(format!("proj_{}", project.pref))
+    .fetch_one(&pool)
+    .await?;
+    assert!(exists);
+    let (status, body) = post_sql(
+        &http,
+        &session,
+        &project.pref,
+        json!({"sql": "DROP TABLE notes;", "read_only": false, "confirm": true}),
+    )
+    .await?;
+    assert_eq!(status, 200, "{body}");
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'notes')",
+    )
+    .bind(format!("proj_{}", project.pref))
+    .fetch_one(&pool)
+    .await?;
+    assert!(!exists);
+    let (status, body) = console_migrate(
+        &http,
+        &session,
+        &project.pref,
+        "0008_drop_todos.sql",
+        "DROP TABLE todos;",
+    )
+    .await?;
+    assert_eq!(status, 200, "{body}");
+    Ok(())
+}
+
+async fn revert_gate() -> anyhow::Result<()> {
+    let http = live().await?;
+    let project = create_project(&http, 18000).await?;
+    let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+    let session = console_token(&pool, &http, &project).await?;
+    let (status, body) = post_sql(
+        &http,
+        &session,
+        &project.pref,
+        json!({
+            "mode": "migration",
+            "version": "0004_widget.sql",
+            "sql": "CREATE TABLE widget (id int);"
+        }),
+    )
+    .await?;
+    assert_eq!(status, 200, "{body}");
+    let row: (Option<String>, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT m.source, m.sql, m.applied_by FROM reactor.schema_migrations m \
+         JOIN reactor.projects p ON p.id = m.project_id \
+         WHERE p.ref = $1 AND m.version = '0004_widget.sql'",
+    )
+    .bind(&project.pref)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(row.0.as_deref(), Some("console"));
+    assert!(row.1.as_ref().is_some_and(|sql| sql.contains("widget")));
+    assert!(row.2.is_some());
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            &format!("/console/v1/projects/{}/migrations/0004_widget.sql/revert", project.pref),
+            Some(&session),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let parsed: Value = serde_json::from_str(&body)?;
+    let next = parsed["version"].as_str().context("revert version")?;
+    assert!(next.contains("_revert_widget.sql"), "{next}");
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'widget')",
+    )
+    .bind(format!("proj_{}", project.pref))
+    .fetch_one(&pool)
+    .await?;
+    assert!(!exists);
+    let original: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM reactor.schema_migrations m JOIN reactor.projects p ON p.id = m.project_id \
+         WHERE p.ref = $1 AND m.version = '0004_widget.sql'",
+    )
+    .bind(&project.pref)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(original, 1);
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            &format!("/console/v1/projects/{}/migrations/0004_widget.sql/revert", project.pref),
+            Some(&session),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 409, "{body}");
+    let (status, body) = post_sql(
+        &http,
+        &session,
+        &project.pref,
+        json!({
+            "mode": "migration",
+            "version": "0006_touch.sql",
+            "sql": "UPDATE notes SET body = 'touched';"
+        }),
+    )
+    .await?;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            &format!("/console/v1/projects/{}/migrations/0006_touch.sql/revert", project.pref),
+            Some(&session),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("no safe revert"), "{body}");
+    let applied: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM reactor.schema_migrations m JOIN reactor.projects p ON p.id = m.project_id \
+         WHERE p.ref = $1 AND m.version LIKE '%touch%'",
+    )
+    .bind(&project.pref)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(applied, 1);
+    Ok(())
+}
+
+async fn reset_role_gate() -> anyhow::Result<()> {
+    let http = live().await?;
+    let project = create_project(&http, 18000).await?;
+    let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+    let session = console_token(&pool, &http, &project).await?;
+    let email = format!("ops-{}@example.com", &project.pref[..8]);
+    let role = format!("proj_{}_admin", project.pref);
+    let (status, body) = post_sql(
+        &http,
+        &session,
+        &project.pref,
+        json!({"sql": "SELECT 1 AS n"}),
+    )
+    .await?;
+    assert_eq!(status, 200, "{body}");
+    let before: Option<String> =
+        sqlx::query_scalar("SELECT rolpassword FROM pg_authid WHERE rolname = $1")
+            .bind(&role)
+            .fetch_one(&pool)
+            .await?;
+    set_role(&pool, &project.pref, &email, "developer").await?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            &format!("/console/v1/projects/{}/database/reset", project.pref),
+            Some(&session),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 403, "{body}");
+    set_role(&pool, &project.pref, &email, "admin").await?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            &format!("/console/v1/projects/{}/database/reset", project.pref),
+            Some(&session),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    assert!(!body.contains("password"), "{body}");
+    let after: Option<String> =
+        sqlx::query_scalar("SELECT rolpassword FROM pg_authid WHERE rolname = $1")
+            .bind(&role)
+            .fetch_one(&pool)
+            .await?;
+    assert_ne!(before, after);
+    let live_backends: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity WHERE usename = $1",
+    )
+    .bind(&role)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(live_backends, 0);
+    let (status, body) = post_sql(
+        &http,
+        &session,
+        &project.pref,
+        json!({"sql": "SELECT 1 AS n"}),
+    )
+    .await?;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/console/v1/keys",
+            Some(&session),
+            Some(json!({"name": "no-reset", "scopes": ["projects.create", "projects.sql"]})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let minted: Value = serde_json::from_str(&body)?;
+    let key = minted["token"].as_str().context("key")?.to_string();
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/console/v1/projects",
+            Some(&key),
+            Some(json!({"name": "Keyed"})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let keyed: Value = serde_json::from_str(&body)?;
+    let keyed_ref = keyed["ref"].as_str().context("ref")?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            &format!("/console/v1/projects/{keyed_ref}/database/reset"),
+            Some(&key),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 403, "{body}");
+    Ok(())
 }

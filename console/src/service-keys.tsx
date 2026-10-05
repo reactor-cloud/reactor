@@ -9,6 +9,7 @@ import { Copy } from "lucide-react"
 const SCOPES = [
   ["projects.create", "Create projects"],
   ["projects.migrate", "Apply migrations"],
+  ["projects.sql", "Run SQL"],
   ["auth.settings", "Verification and MFA"],
   ["auth.providers", "OAuth providers"],
   ["auth.email", "SMTP and templates"],

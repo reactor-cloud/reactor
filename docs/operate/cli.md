@@ -18,7 +18,7 @@ brew tap reactor-cloud/reactor
 brew install reactor
 ```
 
-`v1.26.10-beta5` builds from source and needs Rust, which Homebrew installs as a build dependency. The formula uses tag `v1.26.10-beta5` of [reactor-cloud/reactor](https://github.com/reactor-cloud/reactor).
+`v1.26.10-beta7` builds from source and needs Rust, which Homebrew installs as a build dependency. The formula uses tag `v1.26.10-beta7` of [reactor-cloud/reactor](https://github.com/reactor-cloud/reactor).
 
 From a clone of the server repository, at the repository root:
 
@@ -71,7 +71,16 @@ reactor service-keys create factory --scope projects.create --scope auth.users
 reactor service-keys revoke <id>
 ```
 
-`service-keys` lists the signed-in operator's console service keys: id, name, scopes, and created time. `create` prints the token once. Repeat `--scope` for each scope: `projects.create`, `projects.migrate`, `auth.settings`, `auth.providers`, `auth.email`, `auth.users`. `revoke` deletes that key.
+`service-keys` lists the signed-in operator's console service keys: id, name, scopes, and created time. `create` prints the token once. Repeat `--scope` for each scope: `projects.create`, `projects.migrate`, `projects.sql`, `auth.settings`, `auth.providers`, `auth.email`, `auth.users`. `revoke` deletes that key.
+
+## SQL
+
+```sh
+reactor sql --file query.sql
+reactor sql --write --confirm
+```
+
+`sql` runs against the linked project. The default is a read-only transaction. `--write` allows changes. `--confirm` accepts warnings such as `DROP` or a table created without row-level security. With no `--file`, the statement comes from stdin.
 
 ## Deploy and database
 

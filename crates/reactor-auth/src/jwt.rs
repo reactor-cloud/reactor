@@ -28,6 +28,8 @@ pub struct TokenClaims {
     pub aud: String,
     pub exp: usize,
     pub iat: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jti: Option<String>,
 }
 
 impl JwtIssuer {
@@ -89,6 +91,7 @@ impl JwtIssuer {
             aud: String::new(),
             iat: now,
             exp: now + ttl_secs as usize,
+            jti: None,
         };
         let header = Header::new(Algorithm::EdDSA);
         Ok(encode(&header, &claims, &self.encoding)?)
@@ -107,6 +110,27 @@ impl JwtIssuer {
             aud: aud.to_string(),
             iat: now,
             exp: now + ttl_secs as usize,
+            jti: None,
+        };
+        let header = Header::new(Algorithm::EdDSA);
+        Ok(encode(&header, &claims, &self.encoding)?)
+    }
+
+    pub fn sign_audience_unique(
+        &self,
+        sub: &str,
+        aud: &str,
+        ttl_secs: u64,
+    ) -> anyhow::Result<String> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as usize;
+        let claims = TokenClaims {
+            sub: sub.to_string(),
+            pref: String::new(),
+            role: aud.to_string(),
+            aud: aud.to_string(),
+            iat: now,
+            exp: now + ttl_secs as usize,
+            jti: Some(random_token()),
         };
         let header = Header::new(Algorithm::EdDSA);
         Ok(encode(&header, &claims, &self.encoding)?)

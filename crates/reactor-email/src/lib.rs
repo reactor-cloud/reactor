@@ -41,6 +41,13 @@ pub fn reserved() -> &'static [Template] {
             body_html:
                 "<p>Confirm {{email}}.</p><p>Code: {{code}}</p><p><a href=\"{{link}}\">{{link}}</a></p>",
         },
+        Template {
+            name: "otp",
+            subject: "Your sign-in code",
+            body_text: "Sign in as {{email}}.\n\nCode: {{code}}\n\nThe code expires in 10 minutes.\n",
+            body_html:
+                "<p>Sign in as {{email}}.</p><p>Code: {{code}}</p><p>The code expires in 10 minutes.</p>",
+        },
     ]
 }
 
