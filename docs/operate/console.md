@@ -18,23 +18,25 @@ An operator can belong to many projects and still have no row in `reactor.users`
 | Cluster page, console users | platform admin |
 | Create a project | any operator |
 | Data, storage, functions, sites, logs | developer |
+| SQL editor | admin |
 | Project users, team, rotate API keys | admin |
 | Rename or delete the project | owner |
 
 Console JWTs use the same Ed25519 key with `aud=console` and `role=console`. They are rejected by `/auth/v1` and `/data/v1`. Project JWTs are rejected by `/console/v1`.
 
-A console service key uses `aud=console-key`. A human session mints it from the avatar menu or with `reactor service-keys`. The secret is shown once. `projects.create` can create projects. `projects.migrate`, `auth.settings`, `auth.providers`, `auth.email`, and `auth.users` work only on projects that same key created. Revoke deletes the key and clears that stamp.
+A console service key uses `aud=console-key`. A human session mints it from the avatar menu or with `reactor service-keys`. The secret is shown once. `projects.create` can create projects. `projects.migrate`, `projects.sql`, `auth.settings`, `auth.providers`, `auth.email`, and `auth.users` work only on projects that same key created. `auth.email` includes allowing cluster SMTP on those projects when the operator is a platform admin. The cluster mail server stays closed. Revoke deletes the key and clears that stamp.
 
 An operator can enroll a TOTP authenticator or a passkey. When one is enrolled, login finishes through `/console/v1/mfa`.
 
 ## Pages
 
-Outside a project the sidebar lists Projects and, for a platform admin, Cluster and Console users. Service keys is in the avatar menu for every operator. Inside a project it lists Overview, API keys, Auth, Data, Storage, Functions, and Sites, with Logs, Team, and Settings at the bottom.
+Outside a project the sidebar lists Projects and, for a platform admin, Cluster and Console users. Service keys is in the avatar menu for every operator. Inside a project it lists Overview, API keys, Auth, Data, SQL, Storage, Functions, and Sites, with Logs, Team, and Settings at the bottom.
 
 - **Overview** shows the project name, counts, and 24-hour traffic for auth, database, functions, and sites.
 - **API keys** shows the anon key and a hidden service key, with reveal, copy, and rotate. Plaintext exists only at create and rotate.
-- **Auth** has an inner sidebar: Users, Providers, 2FA, Email, and Templates. Users lists project users and whether the email is verified. An owner or admin can change a password or delete a user. Providers turns email verification on or off and stores OAuth client credentials. 2FA turns on a second factor for password sign-in. Email is the project's SMTP server and link base. A platform admin can allow that project to use the cluster SMTP server, which sends when the project host is empty. Templates edits `confirm_email`, `magic_link`, `recovery`, and `invite`. `/email` redirects to Auth → Email.
+- **Auth** has an inner sidebar: Users, Providers, 2FA, Email, and Templates. Users lists project users and whether the email is verified. An owner or admin can change a password or delete a user. Providers turns email verification on or off and stores OAuth client credentials. 2FA turns on a second factor for password sign-in. Email is the project's SMTP server and link base. A platform admin can allow that project to use the cluster SMTP server, which sends when the project host is empty. Templates edits `confirm_email`, `magic_link`, `recovery`, `invite`, and `otp`. `/email` redirects to Auth → Email.
 - **Data** lists tables, can create one, and opens a grid. That grid is every row in the schema. It does not apply a user's row-level security policy.
+- **SQL** runs queries as the project database role. It is read-only until you turn that off. `DROP`, a delete or update without `WHERE`, and a table created without row-level security ask you to confirm. Run as migration stores the SQL and can revert a `CREATE TABLE`, `CREATE INDEX`, `CREATE POLICY`, or `ADD COLUMN`. Owners and admins can reset the database role from Settings. That cancels in-flight SQL and migrations. The password is not shown.
 - **Storage** is the blob browser under the project prefix.
 - **Functions** opens Overview, Versions, Logs, Variables, and Test. Promote pins a version. Demote clears the pin. Variables are encrypted per function and the value is never shown again.
 - **Sites** opens the project's site: Overview, Deployments, Logs, Variables, and Domains. A custom host shows the TXT record until it verifies.

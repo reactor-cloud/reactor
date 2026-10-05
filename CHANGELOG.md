@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.26.10-beta7
+
+Package manifests use `1.26.10-beta7`. The JavaScript, Swift, and Kotlin clients stay on `1.26.9-beta.2`.
+
+- The console SQL page and `reactor sql` run as a per-project database role. Reads are the default. Destructive statements ask for confirmation. A migration can be stored and reverted.
+- A console service key with `projects.sql` can run that SQL on projects the key created. Each key token has its own `jti`.
+- `auth.email` can allow cluster SMTP on projects that key created when the operator is a platform admin. The cluster mail server stays closed.
+
+## v1.26.10-beta6
+
+Package manifests use `1.26.10-beta6`. The JavaScript, Swift, and Kotlin clients stay on `1.26.9-beta.2`.
+
+- `POST /auth/v1/otp` mails a 6-digit sign-in code. `POST /auth/v1/otp/verify` returns a session. The code lasts 10 minutes and is rate limited.
+
 ## v1.26.10-beta5
 
 Package manifests use `1.26.10-beta5`. The JavaScript, Swift, and Kotlin clients stay on `1.26.9-beta.2`.

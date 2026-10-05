@@ -16,7 +16,10 @@ export function Settings() {
   const [confirm, setConfirm] = useState(false)
   const [typed, setTyped] = useState("")
   const [busy, setBusy] = useState(false)
+  const [resetOpen, setResetOpen] = useState(false)
+  const [resetDone, setResetDone] = useState(false)
   const owner = role === "owner"
+  const canReset = role === "owner" || role === "admin"
 
   useEffect(() => {
     api<Project[]>("/console/v1/projects").then((projects) => {
@@ -39,6 +42,21 @@ export function Settings() {
       window.dispatchEvent(new Event("reactor-projects"))
     } catch (err) {
       setError(err instanceof Error ? err.message : "rename failed")
+    }
+  }
+
+  async function resetRole() {
+    setBusy(true)
+    setError("")
+    setResetDone(false)
+    try {
+      await api(`/console/v1/projects/${ref}/database/reset`, { method: "POST" })
+      setResetOpen(false)
+      setResetDone(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "reset failed")
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -78,6 +96,19 @@ export function Settings() {
       </section>
 
       <section className="grid gap-3">
+        <h2 className="text-sm font-medium">Database role</h2>
+        <p className="text-sm text-muted-foreground">
+          Resets the project database role password. In-flight SQL and migrations on this project are cancelled.
+        </p>
+        <div>
+          <Button type="button" variant="outline" disabled={!canReset || busy} onClick={() => setResetOpen(true)}>
+            Reset database role
+          </Button>
+        </div>
+        {resetDone && <p className="text-sm text-muted-foreground">Database role reset.</p>}
+      </section>
+
+      <section className="grid gap-3">
         <h2 className="text-sm font-medium">Later</h2>
         <Later title="Migrate" detail="Move this project to another Reactor cluster." />
         <Later title="Transfer" detail="Give this project to another owner." />
@@ -95,6 +126,25 @@ export function Settings() {
         </div>
       </section>
       {error && <p className="text-sm text-destructive">{error}</p>}
+
+      {resetOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="grid w-full max-w-md gap-3 rounded-lg border bg-background p-4 shadow-lg">
+            <h2 className="text-base font-medium">Reset the database role?</h2>
+            <p className="text-sm text-muted-foreground">
+              In-flight SQL and migrations on this project are cancelled. The new password stays on the server.
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setResetOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="button" disabled={busy} onClick={resetRole}>
+                Reset database role
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {confirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">

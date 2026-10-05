@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS reactor.auth_settings (
 
 ALTER TABLE reactor.auth_challenges DROP CONSTRAINT IF EXISTS auth_challenges_kind_check;
 ALTER TABLE reactor.auth_challenges ADD CONSTRAINT auth_challenges_kind_check
-  CHECK (kind IN ('magic_link', 'recovery', 'invite', 'confirm_email', 'mfa', 'enroll', 'oauth_code'));
+  CHECK (kind IN ('magic_link', 'recovery', 'invite', 'confirm_email', 'mfa', 'enroll', 'oauth_code', 'otp'));
 
 ALTER TABLE reactor.auth_challenges ADD COLUMN IF NOT EXISTS code_hash text;
 ALTER TABLE reactor.auth_challenges ADD COLUMN IF NOT EXISTS attempts int NOT NULL DEFAULT 0;

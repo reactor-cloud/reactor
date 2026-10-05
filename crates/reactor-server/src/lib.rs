@@ -11,6 +11,7 @@ mod mfa;
 mod oauth;
 mod project_auth;
 mod sites_proc;
+mod sql;
 
 use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
@@ -40,6 +41,7 @@ use uuid::Uuid;
 
 pub use config::Config;
 pub use lambda::{from_apigw_v2, run_lambda, to_apigw_v2};
+pub use sql::superware_launch_sql;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -53,6 +55,7 @@ pub struct AppState {
     pub publisher: Arc<dyn FunctionPublisher>,
     pub http: reqwest::Client,
     pub sites: Arc<SiteSupervisor>,
+    pub project_pools: sql::ProjectPools,
 }
 
 pub struct ApiError {
@@ -189,6 +192,13 @@ pub async fn build_app(config: Config) -> anyhow::Result<Router> {
             }
         }
     });
+    sql::ensure_all(
+        &pool,
+        dedicated.as_ref(),
+        config.dedicated_database_url.as_deref(),
+        issuer.seal_key(),
+    )
+    .await?;
     let identity = Arc::new(InternalIdentity {
         pool: pool.clone(),
         issuer: (*issuer).clone(),
@@ -260,6 +270,7 @@ pub async fn build_app(config: Config) -> anyhow::Result<Router> {
         publisher,
         http: reqwest::Client::new(),
         sites,
+        project_pools: sql::ProjectPools::default(),
     };
     Ok(router(state))
 }
@@ -487,6 +498,15 @@ async fn create_project(
     )
     .await
     .map_err(internal)?;
+    sql::ensure_project_role(
+        &state.pool,
+        &state.pool,
+        state.issuer.seal_key(),
+        id,
+        &pref,
+    )
+    .await
+    .map_err(internal)?;
     let anon = state
         .issuer
         .sign(&pref, "anon", "anon", 60 * 60 * 24 * 365 * 10)
@@ -580,6 +600,16 @@ async fn patch_project(
     )
     .await
     .map_err(internal)?;
+    sql::ensure_project_role(
+        &state.pool,
+        &pool,
+        state.issuer.seal_key(),
+        id,
+        pref.as_str(),
+    )
+    .await
+    .map_err(internal)?;
+    state.project_pools.forget(id).await;
     sqlx::query("UPDATE reactor.projects SET database_url = $1 WHERE id = $2")
         .bind(&body.database_url)
         .bind(id)
@@ -640,6 +670,7 @@ async fn migrate_http(
             state.dedicated.as_ref(),
             std::path::Path::new(&state.config.sql_dir),
             state.config.dedicated_database_url.as_deref(),
+            state.issuer.seal_key(),
         )
         .await
         .map_err(internal)?;
@@ -656,6 +687,15 @@ async fn migrate_http(
         std::path::Path::new(&state.config.sql_dir),
         resolved.project_id,
         &format!("proj_{}", resolved.pref),
+    )
+    .await
+    .map_err(internal)?;
+    sql::ensure_project_role(
+        &state.pool,
+        &pool,
+        state.issuer.seal_key(),
+        resolved.project_id,
+        &resolved.pref,
     )
     .await
     .map_err(internal)?;

@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router-dom"
 import { Data } from "@/data"
+import { Sql } from "@/sql"
 import { Logs } from "@/logs"
 import { Cluster } from "@/cluster"
 import { Operators } from "@/operators"
@@ -43,6 +44,7 @@ export default function App() {
           <Route path="p/:ref/email" element={<EmailRedirect />} />
           <Route path="p/:ref/data" element={<Data />} />
           <Route path="p/:ref/data/:table" element={<Data />} />
+          <Route path="p/:ref/sql" element={<Sql />} />
           <Route path="p/:ref/storage" element={<Storage />} />
           <Route path="p/:ref/functions" element={<Functions />} />
           <Route path="p/:ref/functions/:name" element={<Functions />} />

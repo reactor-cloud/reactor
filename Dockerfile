@@ -6,6 +6,9 @@ COPY console .
 RUN npm run build
 
 FROM rust:1-bookworm AS build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates

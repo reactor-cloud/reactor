@@ -88,6 +88,18 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DbCmd,
     },
+    /// Run SQL against the linked project.
+    Sql {
+        /// Read the query from a file. Otherwise read stdin.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Allow writes. The default runs in a read-only transaction.
+        #[arg(long)]
+        write: bool,
+        /// Confirm warnings such as DROP or a missing row-level security policy.
+        #[arg(long)]
+        confirm: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -121,6 +133,7 @@ enum ServiceKeysCmd {
             value_parser = [
                 "projects.create",
                 "projects.migrate",
+                "projects.sql",
                 "auth.settings",
                 "auth.providers",
                 "auth.email",
@@ -321,6 +334,11 @@ async fn main() -> anyhow::Result<()> {
             DbCmd::Tables => tables(context).await,
             DbCmd::Rows { table } => rows(context, &table).await,
         },
+        Cmd::Sql {
+            file,
+            write,
+            confirm,
+        } => run_sql(context, file, write, confirm).await,
     }
 }
 
@@ -1270,6 +1288,42 @@ async fn storage(context: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn sql_payload(sql: &str, write: bool, confirm: bool) -> Value {
+    json!({
+        "sql": sql,
+        "mode": "run",
+        "read_only": !write,
+        "confirm": confirm,
+    })
+}
+
+async fn run_sql(
+    context: Option<&str>,
+    file: Option<PathBuf>,
+    write: bool,
+    confirm: bool,
+) -> anyhow::Result<()> {
+    let sql = match file {
+        Some(path) => fs::read_to_string(path)?,
+        None => {
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+            buf
+        }
+    };
+    let pref = pref()?;
+    let body = console(
+        context,
+        Scope::Project,
+        "POST",
+        &format!("/console/v1/projects/{pref}/sql"),
+        Some(sql_payload(&sql, write, confirm)),
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&body)?);
+    Ok(())
+}
+
 async fn tables(context: Option<&str>) -> anyhow::Result<()> {
     let pref = pref()?;
     let body = console(
@@ -1515,6 +1569,36 @@ mod context_tests {
         let dir = std::env::temp_dir().join(format!("reactor-ctx-{name}-{n}"));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn sql_flags_build_a_read_only_request() {
+        let cli = Cli::try_parse_from([
+            "reactor",
+            "sql",
+            "--file",
+            "q.sql",
+            "--write",
+            "--confirm",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Sql {
+                file,
+                write,
+                confirm,
+            } => {
+                assert_eq!(file.unwrap(), PathBuf::from("q.sql"));
+                assert!(write);
+                assert!(confirm);
+            }
+            _ => panic!("sql command"),
+        }
+        let body = sql_payload("SELECT 1", false, false);
+        assert_eq!(body["mode"], "run");
+        assert_eq!(body["read_only"], true);
+        assert_eq!(body["confirm"], false);
+        assert_eq!(body["sql"], "SELECT 1");
     }
 
     #[test]

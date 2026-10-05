@@ -65,7 +65,16 @@ pub fn mount(app: Router<AppState>) -> Router<AppState> {
         .route("/console/v1/projects/{pref}/tables", post(create_table))
         .route(
             "/console/v1/projects/{pref}/migrations",
-            post(apply_migration),
+            get(list_migrations).post(apply_migration),
+        )
+        .route(
+            "/console/v1/projects/{pref}/migrations/{version}/revert",
+            post(revert_migration),
+        )
+        .route("/console/v1/projects/{pref}/sql", post(run_sql))
+        .route(
+            "/console/v1/projects/{pref}/database/reset",
+            post(reset_database),
         )
         .route(
             "/console/v1/projects/{pref}/tables/{table}",
@@ -199,10 +208,14 @@ pub(crate) fn console_key_scope(method: &str, path: &str) -> Option<&'static str
         ("GET", ["email", "templates"]) => Some("auth.email"),
         ("GET" | "PUT", ["email", "templates", name]) if segment(name) => Some("auth.email"),
         ("POST", ["email", "templates", name, "reset"]) if segment(name) => Some("auth.email"),
+        ("PUT", ["email", "cluster"]) => Some("auth.email"),
         ("GET", ["users"]) => Some("auth.users"),
         ("GET" | "DELETE", ["users", id]) if segment(id) => Some("auth.users"),
         ("POST", ["users", id, "password"]) if segment(id) => Some("auth.users"),
         ("POST", ["migrations"]) => Some("projects.migrate"),
+        ("GET", ["migrations"]) => Some("projects.migrate"),
+        ("POST", ["migrations", version, "revert"]) if segment(version) => Some("projects.migrate"),
+        ("POST", ["sql"]) => Some("projects.sql"),
         _ => None,
     }
 }
@@ -290,6 +303,7 @@ pub(crate) async fn console_key_guard(
 const KEY_SCOPES: &[&str] = &[
     "projects.create",
     "projects.migrate",
+    "projects.sql",
     "auth.settings",
     "auth.providers",
     "auth.email",
@@ -1043,7 +1057,7 @@ async fn create_key(
     let id = Uuid::new_v4();
     let token = state
         .issuer
-        .sign_audience(
+        .sign_audience_unique(
             &operator.id.to_string(),
             "console-key",
             60 * 60 * 24 * 365 * 10,
@@ -1133,6 +1147,9 @@ async fn create_project(
     )
     .await
     .map_err(internal)?;
+    crate::sql::ensure_project_role(&state.pool, &state.pool, state.issuer.seal_key(), id, &pref)
+        .await
+        .map_err(internal)?;
     crate::project_auth::insert_settings(&state.pool, id)
         .await
         .map_err(internal)?;
@@ -1219,6 +1236,10 @@ async fn delete_project(
         .execute(&pool)
         .await
         .map_err(internal)?;
+    crate::sql::drop_project_role(&pool, &project.pref)
+        .await
+        .map_err(internal)?;
+    state.project_pools.forget(project.id).await;
     sqlx::query("DELETE FROM reactor.projects WHERE id = $1")
         .bind(project.id)
         .execute(&state.pool)
@@ -1498,11 +1519,12 @@ async fn resolve_schema(
     if !owned_schema(pref, name) {
         return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid schema"));
     }
-    let found: Option<String> = sqlx::query_scalar("SELECT nspname FROM pg_namespace WHERE nspname = $1")
-        .bind(name)
-        .fetch_optional(pool)
-        .await
-        .map_err(internal)?;
+    let found: Option<String> =
+        sqlx::query_scalar("SELECT nspname FROM pg_namespace WHERE nspname = $1")
+            .bind(name)
+            .fetch_optional(pool)
+            .await
+            .map_err(internal)?;
     found.ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "schema not found"))
 }
 
@@ -1622,10 +1644,7 @@ async fn create_table(
         table = body.name,
         defs = defs.join(", "),
     );
-    sqlx::raw_sql(&sql)
-        .execute(&pool)
-        .await
-        .map_err(internal)?;
+    sqlx::raw_sql(&sql).execute(&pool).await.map_err(internal)?;
     reload(&state).await?;
     Ok(StatusCode::CREATED)
 }
@@ -1634,6 +1653,17 @@ async fn create_table(
 struct MigrationBody {
     version: String,
     sql: String,
+    down_sql: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SqlBody {
+    sql: String,
+    mode: Option<String>,
+    read_only: Option<bool>,
+    confirm: Option<bool>,
+    version: Option<String>,
+    down_sql: Option<String>,
 }
 
 pub(crate) fn migration_issue(version: &str, sql: &str) -> Option<&'static str> {
@@ -1657,88 +1687,7 @@ pub(crate) fn migration_issue(version: &str, sql: &str) -> Option<&'static str> 
     if sql.len() > 200_000 || sql.trim().is_empty() {
         return Some("invalid sql");
     }
-    let lower = sql.to_ascii_lowercase();
-    if lower.contains("reactor.")
-        || lower.contains("proj_")
-        || lower.contains("public.")
-        || sql.contains("--")
-        || sql.contains("/*")
-    {
-        return Some("sql is not allowed");
-    }
-    for statement in sql_statements(sql) {
-        let trimmed = statement.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let word = trimmed
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_ascii_uppercase();
-        if word != "CREATE"
-            && word != "ALTER"
-            && word != "GRANT"
-            && word != "REVOKE"
-            && word != "INSERT"
-            && word != "COMMENT"
-        {
-            return Some("sql is not allowed");
-        }
-    }
     None
-}
-
-pub(crate) fn sql_statements(sql: &str) -> Vec<&str> {
-    let bytes = sql.as_bytes();
-    let mut start = 0usize;
-    let mut i = 0usize;
-    let mut parts = Vec::new();
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' | b'"' => {
-                let quote = bytes[i];
-                i += 1;
-                while i < bytes.len() {
-                    if bytes[i] == quote {
-                        if i + 1 < bytes.len() && bytes[i + 1] == quote {
-                            i += 2;
-                            continue;
-                        }
-                        i += 1;
-                        break;
-                    }
-                    i += 1;
-                }
-            }
-            b'$' => {
-                let tag_at = i;
-                let mut j = i + 1;
-                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
-                    j += 1;
-                }
-                if j < bytes.len() && bytes[j] == b'$' {
-                    let tag = &sql[tag_at..=j];
-                    let after = j + 1;
-                    if let Some(found) = sql[after..].find(tag) {
-                        i = after + found + tag.len();
-                        continue;
-                    }
-                }
-                i += 1;
-            }
-            b';' => {
-                parts.push(&sql[start..i]);
-                i += 1;
-                start = i;
-            }
-            _ => i += 1,
-        }
-    }
-    if start < sql.len() {
-        parts.push(&sql[start..]);
-    }
-    parts
 }
 
 fn pg_text(err: sqlx::Error) -> String {
@@ -1754,59 +1703,107 @@ async fn apply_migration(
     Path(pref): Path<String>,
     Json(body): Json<MigrationBody>,
 ) -> Result<Json<Value>, ApiError> {
-    run_migration(state, headers, pref, body).await
+    let operator = require_operator(&state, &headers).await?;
+    let project = require_member(&state, &operator, &pref, "admin").await?;
+    crate::sql::apply_user_migration(
+        &state,
+        project.id,
+        &project.pref,
+        Some(operator.id),
+        &body.version,
+        &body.sql,
+        body.down_sql.as_deref(),
+        "console",
+    )
+    .await?;
+    reload(&state).await?;
+    Ok(Json(json!({"ok": true})))
 }
 
-async fn run_migration(
-    state: AppState,
+async fn list_migrations(
+    State(state): State<AppState>,
     headers: HeaderMap,
-    pref: String,
-    body: MigrationBody,
+    Path(pref): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let operator = require_operator(&state, &headers).await?;
     let project = require_member(&state, &operator, &pref, "admin").await?;
-    let schema = schema_name(&project.pref)?;
-    if let Some(issue) = migration_issue(&body.version, &body.sql) {
-        return Err(ApiError::new(StatusCode::BAD_REQUEST, issue));
-    }
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM reactor.schema_migrations WHERE project_id = $1 AND version = $2",
-    )
-    .bind(project.id)
-    .bind(&body.version)
-    .fetch_one(&state.pool)
-    .await
-    .map_err(internal)?;
-    if count > 0 {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "migration already applied",
-        ));
-    }
-    let mut tx = state.pool.begin().await.map_err(internal)?;
-    if let Err(err) = sqlx::query(&format!("SET LOCAL search_path TO \"{schema}\""))
-        .execute(&mut *tx)
-        .await
-    {
-        return Err(internal(err));
-    }
-    for statement in sql_statements(&body.sql) {
-        let trimmed = statement.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Err(err) = sqlx::query(trimmed).execute(&mut *tx).await {
-            return Err(ApiError::new(StatusCode::BAD_REQUEST, pg_text(err)));
-        }
-    }
-    sqlx::query("INSERT INTO reactor.schema_migrations (project_id, version) VALUES ($1, $2)")
-        .bind(project.id)
-        .bind(&body.version)
-        .execute(&mut *tx)
-        .await
-        .map_err(internal)?;
-    tx.commit().await.map_err(internal)?;
+    Ok(Json(crate::sql::list_migrations(&state, project.id).await?))
+}
+
+async fn revert_migration(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((pref, version)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let operator = require_operator(&state, &headers).await?;
+    let project = require_member(&state, &operator, &pref, "admin").await?;
+    let next =
+        crate::sql::revert_migration(&state, project.id, &project.pref, operator.id, &version)
+            .await?;
     reload(&state).await?;
+    Ok(Json(json!({"ok": true, "version": next})))
+}
+
+async fn run_sql(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(pref): Path<String>,
+    Json(body): Json<SqlBody>,
+) -> Result<Response, ApiError> {
+    let operator = require_operator(&state, &headers).await?;
+    let project = require_member(&state, &operator, &pref, "admin").await?;
+    let mode = body.mode.as_deref().unwrap_or("run");
+    if mode == "migration" {
+        let version = body.version.as_deref().unwrap_or("");
+        crate::sql::apply_user_migration(
+            &state,
+            project.id,
+            &project.pref,
+            Some(operator.id),
+            version,
+            &body.sql,
+            body.down_sql.as_deref(),
+            "console",
+        )
+        .await?;
+        reload(&state).await?;
+        return Ok(Json(json!({"ok": true})).into_response());
+    }
+    if mode != "run" {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid mode"));
+    }
+    let warnings = crate::sql::classify(&body.sql)?;
+    if !warnings.is_empty() && !body.confirm.unwrap_or(false) {
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "confirmation required", "warnings": warnings})),
+        )
+            .into_response());
+    }
+    let database_url = crate::sql::project_database_url(&state, project.id).await?;
+    let results = crate::sql::exec_as_project(
+        &state,
+        project.id,
+        &project.pref,
+        database_url.as_deref(),
+        &body.sql,
+        body.read_only.unwrap_or(true),
+        false,
+    )
+    .await?;
+    Ok(Json(results).into_response())
+}
+
+async fn reset_database(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(pref): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let operator = require_operator(&state, &headers).await?;
+    let project = require_member(&state, &operator, &pref, "admin").await?;
+    let database_url = crate::sql::project_database_url(&state, project.id).await?;
+    crate::sql::reset_project_role(&state, project.id, &project.pref, database_url.as_deref())
+        .await?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -3336,11 +3333,28 @@ mod tests {
             Some("projects.migrate")
         );
         assert_eq!(
-            console_key_scope("GET", &format!("/console/v1/projects/{REF}/migrations")),
+            console_key_scope("POST", &format!("/console/v1/projects/{REF}/sql")),
+            Some("projects.sql")
+        );
+        assert_eq!(
+            console_key_scope(
+                "POST",
+                &format!("/console/v1/projects/{REF}/database/reset")
+            ),
             None
+        );
+        assert_eq!(
+            console_key_scope("GET", &format!("/console/v1/projects/{REF}/migrations")),
+            Some("projects.migrate")
+        );
+        assert_eq!(
+            console_key_scope("PUT", &format!("/console/v1/projects/{REF}/email/cluster")),
+            Some("auth.email")
         );
         for (method, path) in [
             ("POST", format!("/console/v1/projects/{REF}/email/cluster")),
+            ("PUT", "/console/v1/cluster/email".to_string()),
+            ("GET", "/console/v1/cluster/email".to_string()),
             ("DELETE", format!("/console/v1/projects/{REF}")),
             ("POST", format!("/console/v1/projects/{REF}/members")),
             ("POST", format!("/console/v1/projects/{REF}/keys")),
@@ -3367,14 +3381,8 @@ mod tests {
             migration_issue("app.sql", "CREATE TABLE t (id int);"),
             Some("invalid version")
         );
-        assert_eq!(
-            migration_issue("0001_app.sql", "DROP TABLE cafe;"),
-            Some("sql is not allowed")
-        );
-        assert_eq!(
-            migration_issue("0001_app.sql", "CREATE TABLE reactor.notes (id int);"),
-            Some("sql is not allowed")
-        );
+        assert!(migration_issue("0001_app.sql", "DROP TABLE cafe;").is_none());
+        assert!(migration_issue("0001_app.sql", "CREATE TABLE reactor.notes (id int);").is_none());
         assert!(migration_issue(
             "0001_app.sql",
             "CREATE FUNCTION sw() RETURNS void LANGUAGE plpgsql AS $sw$ BEGIN RETURN; END; $sw$; GRANT EXECUTE ON FUNCTION sw() TO authenticated;"
@@ -3385,10 +3393,8 @@ mod tests {
             "CREATE TABLE sw_settings (id int); INSERT INTO sw_settings (id) VALUES (1); REVOKE ALL ON FUNCTION sw() FROM PUBLIC;"
         )
         .is_none());
-        assert_eq!(
-            migration_issue("0001_app.sql", "DELETE FROM sw_settings;"),
-            Some("sql is not allowed")
-        );
+        assert!(migration_issue("0001_app.sql", "DELETE FROM sw_settings;").is_none());
+        assert!(migration_issue("0001_app.sql", "-- keep\nCREATE TABLE t (id int);").is_none());
     }
 
     #[test]
