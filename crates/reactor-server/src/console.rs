@@ -6,6 +6,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use reactor_auth::{hash_password, random_token, token_hash, verify_password};
+use reactor_core::OpenedProject;
+use reactor_ext_queue::QueueError;
 use reactor_identity::ProjectRef;
 use reactor_sites::{expected_txt, txt_matches, verification_name};
 use serde::Deserialize;
@@ -14,7 +16,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-pub fn mount(app: Router<AppState>) -> Router<AppState> {
+pub fn mount(app: Router<crate::AppCtx>) -> Router<crate::AppCtx> {
     let app = crate::agent::mount(app);
     let app = crate::mfa::mount(app);
     let app = crate::email::mount(app);
@@ -23,6 +25,7 @@ pub fn mount(app: Router<AppState>) -> Router<AppState> {
         .route("/console/v1/setup/restart", post(restart_setup))
         .route("/console/v1/login", post(login))
         .route("/console/v1/me", get(me))
+        .route("/console/v1/extensions", get(extensions_list))
         .route("/console/v1/keys", get(list_keys).post(create_key))
         .route("/console/v1/keys/{id}", delete(delete_key))
         .route("/console/v1/cluster", get(cluster).post(rename_cluster))
@@ -94,6 +97,22 @@ pub fn mount(app: Router<AppState>) -> Router<AppState> {
             post(upload_url),
         )
         .route("/console/v1/projects/{pref}/functions", get(functions))
+        .route(
+            "/console/v1/projects/{pref}/queues",
+            get(console_queues).post(console_create_queue),
+        )
+        .route(
+            "/console/v1/projects/{pref}/queues/{name}/send",
+            post(console_send_queue),
+        )
+        .route(
+            "/console/v1/projects/{pref}/queues/{name}/peek",
+            get(console_peek_queue),
+        )
+        .route(
+            "/console/v1/projects/{pref}/queues/{name}/subscriptions",
+            get(console_queue_subscriptions),
+        )
         .route(
             "/console/v1/projects/{pref}/functions/{name}",
             post(deploy_console_function),
@@ -1144,6 +1163,7 @@ async fn create_project(
         std::path::Path::new(&state.config.sql_dir),
         id,
         &schema,
+        state.extension_sql.as_slice(),
     )
     .await
     .map_err(internal)?;
@@ -2271,7 +2291,6 @@ async fn overview(
          FROM reactor.logs \
          WHERE project_id = $1 \
            AND created_at >= date_trunc('hour', now()) - interval '23 hours' \
-           AND kind IN ('auth', 'database', 'function', 'site') \
          GROUP BY 1, 2",
     )
     .bind(project.id)
@@ -2279,7 +2298,11 @@ async fn overview(
     .await
     .map_err(internal)?;
     let mut counts: HashMap<(String, i64), (i64, i64, i64)> = HashMap::new();
+    let mut extra = Vec::new();
     for (kind, hour, ok, warn, error) in rows {
+        if !extra.contains(&kind) {
+            extra.push(kind.clone());
+        }
         counts.insert((kind, hour), (ok, warn, error));
     }
     let series = |kind: &str| {
@@ -2294,16 +2317,28 @@ async fn overview(
             })
             .collect::<Vec<_>>()
     };
+    let mut kinds = vec![
+        "auth".to_string(),
+        "database".to_string(),
+        "function".to_string(),
+        "site".to_string(),
+    ];
+    extra.sort();
+    extra.dedup();
+    for kind in extra {
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    let mut series_map = serde_json::Map::new();
+    for kind in kinds {
+        series_map.insert(kind.clone(), json!(series(&kind)));
+    }
     Ok(Json(json!({
         "name": project.name,
         "counts": { "users": users, "tables": tables, "files": files, "functions": functions, "sites": sites },
         "hours": hours,
-        "series": {
-            "auth": series("auth"),
-            "database": series("database"),
-            "function": series("function"),
-            "site": series("site"),
-        }
+        "series": series_map,
     })))
 }
 
@@ -2408,25 +2443,11 @@ async fn invoke_console_function(
     };
     let caller = json!({ "sub": operator.id, "ref": project.pref, "role": "console" });
     match crate::run_function(&state, &resolved, &name, &caller, &body, query.version).await {
-        Ok(bytes) => {
-            record_log(&state.pool, project.id, "function", &name, 200, "").await;
-            Ok(Json(
-                json!({ "status": 200, "body": String::from_utf8_lossy(&bytes) }),
-            ))
-        }
+        Ok(bytes) => Ok(Json(
+            json!({ "status": 200, "body": String::from_utf8_lossy(&bytes) }),
+        )),
         Err(err) if err.status == StatusCode::NOT_FOUND => Err(err),
-        Err(err) => {
-            record_log(
-                &state.pool,
-                project.id,
-                "function",
-                &name,
-                500,
-                "invoke failed",
-            )
-            .await;
-            Ok(Json(json!({ "status": 500, "body": err.text() })))
-        }
+        Err(err) => Ok(Json(json!({ "status": 500, "body": err.text() }))),
     }
 }
 
@@ -3204,6 +3225,118 @@ fn file_response(path: &std::path::Path) -> Response {
         _ => "application/octet-stream",
     };
     ([(header::CONTENT_TYPE, kind)], bytes).into_response()
+}
+
+async fn extensions_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    require_operator(&state, &headers).await?;
+    Ok(Json(json!(state.extensions)))
+}
+
+async fn opened_project(state: &AppState, id: Uuid, pref: &str) -> Result<OpenedProject, ApiError> {
+    let url: Option<String> =
+        sqlx::query_scalar("SELECT database_url FROM reactor.projects WHERE id = $1")
+            .bind(id)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(internal)?;
+    let pool = pool_for(state, url.as_deref()).await.map_err(internal)?;
+    Ok(OpenedProject {
+        id,
+        pref: pref.to_string(),
+        schema: format!("proj_{pref}"),
+        pool,
+    })
+}
+
+fn from_queue(err: QueueError) -> ApiError {
+    ApiError::new(err.status(), err.message())
+}
+
+async fn console_queues(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(pref): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let operator = require_operator(&state, &headers).await?;
+    let project = require_member(&state, &operator, &pref, "developer").await?;
+    let opened = opened_project(&state, project.id, &project.pref).await?;
+    let rows = reactor_ext_queue::list_queues(&opened)
+        .await
+        .map_err(from_queue)?;
+    Ok(Json(json!(rows)))
+}
+
+#[derive(Deserialize)]
+struct QueueNameBody {
+    name: String,
+}
+
+async fn console_create_queue(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(pref): Path<String>,
+    Json(body): Json<QueueNameBody>,
+) -> Result<Json<Value>, ApiError> {
+    let operator = require_operator(&state, &headers).await?;
+    let project = require_member(&state, &operator, &pref, "developer").await?;
+    let opened = opened_project(&state, project.id, &project.pref).await?;
+    reactor_ext_queue::create_queue(&opened, &body.name)
+        .await
+        .map_err(from_queue)?;
+    Ok(Json(json!({"name": body.name})))
+}
+
+#[derive(Deserialize)]
+struct QueueSendBody {
+    message: Value,
+    #[serde(default)]
+    delay_secs: i64,
+}
+
+async fn console_send_queue(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((pref, name)): Path<(String, String)>,
+    Json(body): Json<QueueSendBody>,
+) -> Result<Json<Value>, ApiError> {
+    let operator = require_operator(&state, &headers).await?;
+    let project = require_member(&state, &operator, &pref, "developer").await?;
+    let opened = opened_project(&state, project.id, &project.pref).await?;
+    let msg_id = reactor_ext_queue::send(&opened, &name, body.message, body.delay_secs)
+        .await
+        .map_err(from_queue)?;
+    Ok(Json(json!({"msg_id": msg_id})))
+}
+
+async fn console_peek_queue(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((pref, name)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let operator = require_operator(&state, &headers).await?;
+    let project = require_member(&state, &operator, &pref, "developer").await?;
+    let opened = opened_project(&state, project.id, &project.pref).await?;
+    let rows = reactor_ext_queue::peek(&opened, &name)
+        .await
+        .map_err(from_queue)?;
+    Ok(Json(json!(rows)))
+}
+
+async fn console_queue_subscriptions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((pref, name)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let operator = require_operator(&state, &headers).await?;
+    let project = require_member(&state, &operator, &pref, "developer").await?;
+    let opened = opened_project(&state, project.id, &project.pref).await?;
+    let rows = reactor_ext_queue::list_subscriptions(&opened, &name)
+        .await
+        .map_err(from_queue)?;
+    Ok(Json(json!(rows)))
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@ description: The @reactor-cloud/client package. Auth, PostgREST data, storage, a
 
 `@reactor-cloud/client` is the JavaScript client for web apps. It is modeled on the Supabase JavaScript client so code stays portable: `createClient`, `auth.signUp`, `auth.signInWithPassword`, `from(table).select()`, storage buckets, and `functions.invoke` mean the same kind of thing. Data queries are built with `@supabase/postgrest-js` and sent to Reactor’s `/data/v1`, which is PostgREST.
 
-The package is published. This beta is `1.26.9-beta.2` on the `beta` dist-tag, not `latest`.
+The package is published. This beta is `1.26.10-beta8` on the `beta` dist-tag, not `latest`.
 
 ```sh
 npm install @reactor-cloud/client@beta
@@ -19,6 +19,8 @@ npm install @reactor-cloud/client@beta
 | `reactor.from` / `reactor.rpc` | `/data/v1` — PostgREST |
 | `reactor.storage.from` | `/storage/v1` — presign, then upload or download the signed URL |
 | `reactor.functions.invoke` | `/fn/v1/{name}` |
+| `reactor.functions.enqueue` | `/fn/v1/{name}/enqueue` — service key. `task(id)` reads `/fn/v1/_admin/tasks/{id}` |
+| `reactor.queue` | `/queue/v1` — service key, and the queue extension must be on |
 
 The client keeps the session in memory. Pass `session` when you create the client if the page should start signed in. Before sign-in, calls send the anon key. After sign-in, they send the access token.
 
@@ -142,3 +144,24 @@ Upload asks `POST /storage/v1/object/presign` for a PUT URL, then sends the byte
 ```
 
 The exact shape is whatever the function writes to stdout. A non-zero exit throws `ReactorError` with status 500.
+
+## Queue and enqueue
+
+Create the client with the service key. `enqueue` is always available. `queue` needs [the extension](/product/extensions/).
+
+```ts
+const { id } = await reactor.functions.enqueue("ping", {
+  body: { ok: true },
+  delaySecs: 0,
+  maxAttempts: 3,
+})
+const task = await reactor.functions.task(id)
+
+await reactor.queue.create("jobs")
+const { msg_id } = await reactor.queue.send("jobs", { hello: "world" })
+await reactor.queue.subscribe("jobs", { functionName: "echo", vtSecs: 30, qty: 1, maxReads: 3 })
+const rows = await reactor.queue.read("jobs", { vtSecs: 30, qty: 1 })
+await reactor.queue.delete("jobs", rows[0].msg_id)
+```
+
+`task` returns `{ id, kind, status, attempts, max_attempts, last_error }`. `read` and `peek` return `{ msg_id, message, read_ct }[]`. `peek` does not hide the message.

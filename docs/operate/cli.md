@@ -18,7 +18,7 @@ brew tap reactor-cloud/reactor
 brew install reactor
 ```
 
-`v1.26.10-beta7` builds from source and needs Rust, which Homebrew installs as a build dependency. The formula uses tag `v1.26.10-beta7` of [reactor-cloud/reactor](https://github.com/reactor-cloud/reactor).
+`v1.26.10-beta8` builds from source and needs Rust, which Homebrew installs as a build dependency. The formula uses tag `v1.26.10-beta8` of [reactor-cloud/reactor](https://github.com/reactor-cloud/reactor).
 
 From a clone of the server repository, at the repository root:
 
@@ -111,8 +111,14 @@ reactor sites env
 reactor sites env set SITE_BANNER "hello" --visible
 reactor sites env unset SITE_BANNER
 reactor storage
+reactor queue list
+reactor queue create jobs
+reactor queue send jobs '{"hello":"world"}'
+reactor queue read jobs
 ```
 
 `members add` creates an operator if the email is new. The role default is `developer`. `functions` lists deployments. Promote pins a version. Demote clears the pin. `sites env set` without `--visible` stores a secret, and the value is not returned later.
+
+`queue` needs `REACTOR_EXTENSIONS=queue` on the server and the linked service key. `send` takes `--delay-secs`. `read` takes `--vt-secs` and `--qty`. Peek, delete, archive, and subscriptions are on the HTTP API.
 
 `cluster` prints liveness. Platform-admin actions on operators are in the console.

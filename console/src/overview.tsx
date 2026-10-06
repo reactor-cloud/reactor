@@ -8,7 +8,7 @@ type OverviewBody = {
   name: string
   counts: { users: number; tables: number; files: number; functions: number; sites: number }
   hours: number[]
-  series: { auth: Point[]; database: Point[]; function: Point[]; site: Point[] }
+  series: Record<string, Point[]>
 }
 
 export function Overview() {
@@ -31,14 +31,7 @@ export function Overview() {
         { label: "Sites", value: body.counts.sites, icon: Globe },
       ]
     : []
-  const charts = body
-    ? [
-        { label: "Auth", points: body.series.auth },
-        { label: "Database", points: body.series.database },
-        { label: "Functions", points: body.series.function },
-        { label: "Sites", points: body.series.site },
-      ]
-    : []
+  const charts = body ? trafficCharts(body.series) : []
   const totals = charts.map((chart) => sum(chart.points))
   const requests = totals.reduce((sum, item) => sum + item.total, 0)
   const ok = totals.reduce((sum, item) => sum + item.ok, 0)
@@ -163,6 +156,27 @@ function Tip({ swatch, label, value }: { swatch: string; label: string; value: n
       <span className="tabular-nums">{value}</span>
     </div>
   )
+}
+
+const chartOrder = ["auth", "database", "function", "site"]
+
+function trafficCharts(series: Record<string, Point[]>) {
+  const extra = Object.keys(series)
+    .filter((kind) => !chartOrder.includes(kind))
+    .sort()
+  return [...chartOrder, ...extra].map((kind) => ({
+    label: kindLabel(kind),
+    points: series[kind] || [],
+  }))
+}
+
+function kindLabel(kind: string) {
+  if (kind === "auth") return "Auth"
+  if (kind === "database") return "Database"
+  if (kind === "function") return "Functions"
+  if (kind === "site") return "Sites"
+  if (kind === "queue") return "Queue"
+  return kind
 }
 
 function sum(points: Point[]) {

@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api } from "@/lib/api"
 import type { ConsoleContext } from "@/shell"
-import { ChevronLeft, ChevronRight, Plus, X } from "lucide-react"
+import { ChevronLeft, ChevronRight, Database, Plus, X } from "lucide-react"
 
 type Column = { name: string; type: string }
 type TableInfo = { name: string; primary_key: string | null; columns: Column[] }
@@ -126,6 +126,10 @@ export function Data() {
   return (
     <div className="absolute inset-0 flex min-h-0">
       <aside className="flex w-56 shrink-0 flex-col border-r">
+        <div className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
+          <Database className="size-4 shrink-0" />
+          <h1 className="text-base font-semibold">Data</h1>
+        </div>
         <div className="grid gap-2 border-b p-3">
           <label className="grid gap-1 text-xs text-muted-foreground">
             Schema

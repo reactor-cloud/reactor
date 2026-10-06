@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.26.10-beta8
+
+Package manifests use `1.26.10-beta8`. The JavaScript, Swift, and Kotlin clients move to `1.26.10-beta8`.
+
+- Extensions are optional cluster products. `REACTOR_EXTENSIONS=queue` turns Queue on. `GET /platform/v1/extensions` lists what is on.
+- Queue stores messages in the project schema and delivers them to a subscribed function. Only service keys can use it.
+- `POST /fn/v1/{name}/enqueue` stores a task without an extension. Listen mode ticks about once a second. On Lambda, call `POST /_internal/tick` with the operator token.
+- The console shows Queue when the extension is on.
+
 ## v1.26.10-beta7
 
 Package manifests use `1.26.10-beta7`. The JavaScript, Swift, and Kotlin clients stay on `1.26.9-beta.2`.

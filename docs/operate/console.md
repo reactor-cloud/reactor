@@ -17,7 +17,7 @@ An operator can belong to many projects and still have no row in `reactor.users`
 | --- | --- |
 | Cluster page, console users | platform admin |
 | Create a project | any operator |
-| Data, storage, functions, sites, logs | developer |
+| Data, storage, functions, queue, sites, logs | developer |
 | SQL editor | admin |
 | Project users, team, rotate API keys | admin |
 | Rename or delete the project | owner |
@@ -30,9 +30,9 @@ An operator can enroll a TOTP authenticator or a passkey. When one is enrolled, 
 
 ## Pages
 
-Outside a project the sidebar lists Projects and, for a platform admin, Cluster and Console users. Service keys is in the avatar menu for every operator. Inside a project it lists Overview, API keys, Auth, Data, SQL, Storage, Functions, and Sites, with Logs, Team, and Settings at the bottom.
+Outside a project the sidebar lists Projects and, for a platform admin, Cluster and Console users. Service keys is in the avatar menu for every operator. Inside a project it lists Overview, API keys, Auth, Data, SQL, Storage, Functions, and Sites, with Logs, Team, and Settings at the bottom. Queue is in that list only when the cluster has the queue extension.
 
-- **Overview** shows the project name, counts, and 24-hour traffic for auth, database, functions, and sites.
+- **Overview** shows the project name, counts, and 24-hour traffic for auth, database, functions, and sites. Any other log kind from that window is a chart too, including queue.
 - **API keys** shows the anon key and a hidden service key, with reveal, copy, and rotate. Plaintext exists only at create and rotate.
 - **Auth** has an inner sidebar: Users, Providers, 2FA, Email, and Templates. Users lists project users and whether the email is verified. An owner or admin can change a password or delete a user. Providers turns email verification on or off and stores OAuth client credentials. 2FA turns on a second factor for password sign-in. Email is the project's SMTP server and link base. A platform admin can allow that project to use the cluster SMTP server, which sends when the project host is empty. Templates edits `confirm_email`, `magic_link`, `recovery`, `invite`, and `otp`. `/email` redirects to Auth → Email.
 - **Data** lists tables, can create one, and opens a grid. That grid is every row in the schema. It does not apply a user's row-level security policy.
@@ -40,7 +40,8 @@ Outside a project the sidebar lists Projects and, for a platform admin, Cluster 
 - **Storage** is the blob browser under the project prefix.
 - **Functions** opens Overview, Versions, Logs, Variables, and Test. Promote pins a version. Demote clears the pin. Variables are encrypted per function and the value is never shown again.
 - **Sites** opens the project's site: Overview, Deployments, Logs, Variables, and Domains. A custom host shows the TXT record until it verifies.
-- **Logs** are recent function and site lines.
+- **Queue** lists queues in a sidebar and can create one. The selected queue opens Messages and Subscribers. Messages sends a JSON body. Subscribers shows the function, visibility timeout, quantity, and max reads.
+- **Logs** are recent lines of every kind. Search matches kind, name, status, and message. A queue delivery is kind `queue`. The function it called is a separate `function` line.
 - **Settings** renames or deletes the project. Delete asks for the project name.
 
 The cluster pill shows the name, where it runs (local Docker, AWS, or Fly), and a health dot. The Cluster page stores the cluster SMTP server. A project uses it for auth mail only after a platform admin allows that project, and only when the project has no SMTP host of its own. Creating a project in the UI returns the same pair the CLI prints once: `anon_key` and `service_key`. Later visits show the anon key and a hidden service key. Reveal does not mint a new secret. Rotate does, and the previous keys stop working.

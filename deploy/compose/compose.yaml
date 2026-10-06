@@ -99,6 +99,7 @@ services:
       REACTOR_DNS_STUB_FILE: /dns/stub.json
       REACTOR_AGENT__API_KEY: ${REACTOR_AGENT__API_KEY:-}
       REACTOR_AGENT__MODEL: ${REACTOR_AGENT__MODEL:-anthropic/claude-sonnet-4.6}
+      REACTOR_EXTENSIONS: queue
     ports:
       - "127.0.0.1:18000:8000"
     volumes:

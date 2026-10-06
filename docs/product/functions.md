@@ -65,9 +65,33 @@ Content-Type: application/json
 
 `body` is the stdin payload. It defaults to `{}`. `next_run` starts at now.
 
-`POST /fn/v1/_internal/cron` with the operator token takes a Postgres advisory lock, invokes every schedule that is due, and sets `next_run` to one day later. The caller JSON is `{ "sub": "cron", "ref": "<ref>", "role": "service" }`. If the lock is already held, the response is `{ "ran": false }` and nothing else runs. There is no in-process timer. Call the route from cron, EventBridge, or anything else that can hold the operator token.
+`POST /fn/v1/_internal/cron` with the operator token takes a Postgres advisory lock, invokes every schedule that is due, and sets `next_run` to one day later. The caller JSON is `{ "sub": "cron", "ref": "<ref>", "role": "service" }`. If the lock is already held, the response is `{ "ran": false }` and nothing else runs. Listen mode also runs this about once a minute. On Lambda, call this route or [`POST /_internal/tick`](/product/extensions/#when-work-runs). A failed invoke fails that cron pass. The schedule does not retry on its own.
 
-This is not a jobs product. There is no queue, retry policy, or dead-letter store. A failed invoke fails the cron request.
+## Enqueue
+
+Enqueue stores one run of a function and lets the server call it later. It is always available. It is not a [queue](/product/queue/).
+
+```http
+POST /fn/v1/{name}/enqueue
+Authorization: Bearer <service key>
+Content-Type: application/json
+
+{ "body": { "ok": true }, "delay_secs": 0, "max_attempts": 3 }
+```
+
+The response is 201 `{ "id" }`. `body` is the function stdin and defaults to `{}`. `delay_secs` defaults to 0. `max_attempts` defaults to 3. A negative delay or `max_attempts` below 1 is 400. Names that start with `_` are 404.
+
+```http
+GET /fn/v1/_admin/tasks/{id}
+```
+
+The same service key, and the same project, returns `{ "id", "kind", "status", "attempts", "max_attempts", "last_error" }`. Another project's id is 404. `status` is `queued`, `running`, `done`, or `dead`.
+
+Listen mode claims due tasks about once a second. A task that is still `running` after a 30 second lease can be claimed again. A failed attempt waits 2 seconds, then 4, 8, 16, 32, and then 60, and goes back to `queued` while `attempts` is below `max_attempts`. The next failure after that is `dead`. A successful run is `done`. Done rows are removed after 24 hours.
+
+The function log is written when the task actually runs, with kind `function`. Enqueue itself does not write that row.
+
+The clients call this `functions.enqueue(name, { body, delaySecs, maxAttempts })` and `functions.task(id)`. Pass the service key as the client key.
 
 ## Logs
 

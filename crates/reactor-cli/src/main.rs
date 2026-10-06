@@ -88,6 +88,10 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DbCmd,
     },
+    Queue {
+        #[command(subcommand)]
+        cmd: QueueCmd,
+    },
     /// Run SQL against the linked project.
     Sql {
         /// Read the query from a file. Otherwise read stdin.
@@ -185,6 +189,25 @@ enum EnvCmd {
 enum FunctionsCmd {
     Promote { name: String, version: i32 },
     Demote { name: String },
+}
+
+#[derive(Subcommand)]
+enum QueueCmd {
+    List,
+    Create { name: String },
+    Send {
+        name: String,
+        message: String,
+        #[arg(long, default_value_t = 0)]
+        delay_secs: i64,
+    },
+    Read {
+        name: String,
+        #[arg(long, default_value_t = 30)]
+        vt_secs: i32,
+        #[arg(long, default_value_t = 1)]
+        qty: i32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -333,6 +356,20 @@ async fn main() -> anyhow::Result<()> {
             DbCmd::Migrate { all, dry_run } => migrate(context, all, dry_run).await,
             DbCmd::Tables => tables(context).await,
             DbCmd::Rows { table } => rows(context, &table).await,
+        },
+        Cmd::Queue { cmd } => match cmd {
+            QueueCmd::List => queue_list().await,
+            QueueCmd::Create { name } => queue_create(&name).await,
+            QueueCmd::Send {
+                name,
+                message,
+                delay_secs,
+            } => queue_send(&name, &message, delay_secs).await,
+            QueueCmd::Read {
+                name,
+                vt_secs,
+                qty,
+            } => queue_read(&name, vt_secs, qty).await,
         },
         Cmd::Sql {
             file,
@@ -617,6 +654,59 @@ fn service_key() -> anyhow::Result<String> {
     Ok(fs::read_to_string(".reactor/service_key")?
         .trim()
         .to_string())
+}
+
+async fn service_call(method: &str, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
+    let project = project_file()?;
+    let key = service_key()?;
+    let method = reqwest::Method::from_bytes(method.as_bytes())?;
+    let mut req = reqwest::Client::new()
+        .request(
+            method,
+            format!("{}{path}", project.url.trim_end_matches('/')),
+        )
+        .bearer_auth(key);
+    if let Some(body) = body {
+        req = req.json(&body);
+    }
+    read_body(req.send().await?).await
+}
+
+async fn queue_list() -> anyhow::Result<()> {
+    let body = service_call("GET", "/queue/v1/queues", None).await?;
+    for queue in rows_of(&body) {
+        println!("{}", field(queue, "name"));
+    }
+    Ok(())
+}
+
+async fn queue_create(name: &str) -> anyhow::Result<()> {
+    let body = service_call("POST", "/queue/v1/queues", Some(json!({"name": name}))).await?;
+    println!("{}", field(&body, "name"));
+    Ok(())
+}
+
+async fn queue_send(name: &str, message: &str, delay_secs: i64) -> anyhow::Result<()> {
+    let message: Value = serde_json::from_str(message).unwrap_or_else(|_| Value::String(message.to_string()));
+    let body = service_call(
+        "POST",
+        &format!("/queue/v1/queues/{name}/send"),
+        Some(json!({"message": message, "delay_secs": delay_secs})),
+    )
+    .await?;
+    println!("{}", body["msg_id"]);
+    Ok(())
+}
+
+async fn queue_read(name: &str, vt_secs: i32, qty: i32) -> anyhow::Result<()> {
+    let body = service_call(
+        "POST",
+        &format!("/queue/v1/queues/{name}/read"),
+        Some(json!({"vt_secs": vt_secs, "qty": qty})),
+    )
+    .await?;
+    println!("{}", serde_json::to_string(&body)?);
+    Ok(())
 }
 
 fn write_link(url: &str, pref: &str, service_key: &str) -> anyhow::Result<()> {

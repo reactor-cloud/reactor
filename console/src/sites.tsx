@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input"
 import { api } from "@/lib/api"
 import { TrafficCard, type Point } from "@/overview"
 import type { ConsoleContext } from "@/shell"
-import { Copy, X } from "lucide-react"
+import { Copy, Globe, X } from "lucide-react"
 
 type Deployment = { id: string; status: string; error: string; file_count: number; created_at: string }
 type DeploymentDetail = Deployment & { files: string[] }
@@ -21,7 +21,8 @@ export function Sites() {
   return (
     <div className="absolute inset-0 flex min-h-0">
       <aside className="flex w-64 shrink-0 flex-col border-r">
-        <div className="flex h-12 shrink-0 items-center border-b px-3">
+        <div className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
+          <Globe className="size-4 shrink-0" />
           <h1 className="text-base font-semibold">Site</h1>
         </div>
         <div className="flex min-h-0 flex-1 flex-col gap-1 p-2">

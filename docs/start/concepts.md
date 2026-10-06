@@ -43,7 +43,7 @@ Resolution order:
 | Objects | `{ref}/{bucket}/{key}` |
 | Functions, sites, keys | rows with `project_id` |
 
-Creating a project creates the schema, the grants, the anon key, and the service key. Migrations in `sql/project/` apply to every project schema. A migration cannot land on only the project you happen to be using.
+Creating a project creates the schema, the grants, the anon key, and the service key. Migrations in `sql/project/` apply to every project schema. A migration cannot land on only the project you happen to be using. An extension that is on also applies its own project SQL in that same step. [Extensions](/product/extensions/) is where that list is set.
 
 ## Two identities
 

@@ -286,6 +286,24 @@ async fn gate_functions() {
 }
 
 #[tokio::test]
+async fn gate_tasks() {
+    run_gate(async {
+        let http = live().await?;
+        task_gate(&http).await
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn gate_queue() {
+    run_gate(async {
+        let http = live().await?;
+        queue_gate(&http).await
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn gate_sites() {
     run_gate(async {
         let http = live().await?;
@@ -1079,7 +1097,7 @@ async fn server_site_gate(http: &Http, a: &Keys, b: &Keys) -> anyhow::Result<()>
     assert_eq!(first["pid"], second["pid"]);
     let pid = first["pid"].as_u64().context("pid")?.to_string();
     tokio::time::sleep(Duration::from_secs(5)).await;
-    let gone = Command::new("docker")
+    let still = Command::new("docker")
         .args([
             "exec",
             "reactor-v2-app",
@@ -1089,11 +1107,11 @@ async fn server_site_gate(http: &Http, a: &Keys, b: &Keys) -> anyhow::Result<()>
         ])
         .output()?;
     assert!(
-        gone.status.success(),
+        still.status.success(),
         "{}",
-        String::from_utf8_lossy(&gone.stderr)
+        String::from_utf8_lossy(&still.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&gone.stdout).trim(), "gone");
+    assert_eq!(String::from_utf8_lossy(&still.stdout).trim(), "alive");
 
     let bun = create_project(http, 18000).await?;
     let (status, body) = http
@@ -4695,6 +4713,532 @@ async fn gate_oauth() {
     })
     .await;
 }
+
+
+const BOOM_SOURCE: &str = r#"
+const raw = await Bun.stdin.text();
+let req = {};
+try { req = raw ? JSON.parse(raw) : {}; } catch {}
+if (req.file) {
+  const prev = await Bun.file(req.file).text().catch(() => "");
+  await Bun.write(req.file, prev + "x");
+}
+process.exit(1);
+"#;
+
+async fn deploy_source(http: &Http, project: &Keys, name: &str, source: &str) -> anyhow::Result<()> {
+    let zip = reactor_functions::zip_single("index.ts", source)?;
+    let res = http
+        .client
+        .post(Http::url(
+            18000,
+            Some(&project.pref),
+            &format!("/fn/v1/_admin/functions/{name}"),
+        ))
+        .bearer_auth(&project.service)
+        .header("content-type", "application/zip")
+        .body(zip)
+        .send()
+        .await?;
+    let status = res.status().as_u16();
+    let body = res.text().await?;
+    assert_eq!(status, 200, "{body}");
+    Ok(())
+}
+
+async fn force_tick(http: &Http) -> anyhow::Result<()> {
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/_internal/tick?force=1",
+            Some(&http.operator),
+            Some(json!({})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    Ok(())
+}
+
+async fn project_logs(pref: &str, kind: &str, name: &str) -> anyhow::Result<Vec<(i32, String)>> {
+    let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+    Ok(sqlx::query_as(
+        "SELECT l.status, l.message FROM reactor.logs l \
+         JOIN reactor.projects p ON p.id = l.project_id \
+         WHERE p.ref = $1 AND l.kind = $2 AND l.name = $3 \
+         ORDER BY l.id",
+    )
+    .bind(pref)
+    .bind(kind)
+    .bind(name)
+    .fetch_all(&pool)
+    .await?)
+}
+
+async fn task_gate(http: &Http) -> anyhow::Result<()> {
+    let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+    let project = create_project(http, 18000).await?;
+    let project_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM reactor.projects WHERE ref = $1")
+            .bind(&project.pref)
+            .fetch_one(&pool)
+            .await?;
+    let user_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO reactor.users (id, project_id, email, password_hash) VALUES ($1, $2, $3, 'x')",
+    )
+    .bind(user_id)
+    .bind(project_id)
+    .bind(format!("tasks-{user_id}@example.com"))
+    .execute(&pool)
+    .await?;
+    let expired = Uuid::new_v4();
+    let future = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO reactor.sessions (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, now() - interval '1 minute')",
+    )
+    .bind(expired)
+    .bind(user_id)
+    .bind(format!("expired-{expired}"))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO reactor.sessions (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, now() + interval '1 day')",
+    )
+    .bind(future)
+    .bind(user_id)
+    .bind(format!("future-{future}"))
+    .execute(&pool)
+    .await?;
+    force_tick(http).await?;
+    let expired_n: i64 = sqlx::query_scalar("SELECT count(*) FROM reactor.sessions WHERE id = $1")
+        .bind(expired)
+        .fetch_one(&pool)
+        .await?;
+    let future_n: i64 = sqlx::query_scalar("SELECT count(*) FROM reactor.sessions WHERE id = $1")
+        .bind(future)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(expired_n, 0);
+    assert_eq!(future_n, 1);
+
+    deploy_source(http, &project, "echo", FN_SOURCE).await?;
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&project.pref),
+            "POST",
+            "/fn/v1/echo",
+            Some(&project.service),
+            Some(json!({"marker": true})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let direct = project_logs(&project.pref, "function", "echo").await?;
+    assert_eq!(direct, vec![(200, String::new())]);
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&project.pref),
+            "POST",
+            "/fn/v1/echo/enqueue",
+            Some(&project.service),
+            Some(json!({"body": {"sleep": 1500}, "max_attempts": 3})),
+        )
+        .await?;
+    assert_eq!(status, 201, "{body}");
+    let queued: Value = serde_json::from_str(&body)?;
+    let id = queued["id"].as_str().unwrap();
+    let one = http.call(
+        18000,
+        None,
+        "POST",
+        "/_internal/tick?force=1",
+        Some(&http.operator),
+        Some(json!({})),
+    );
+    let two = http.call(
+        18000,
+        None,
+        "POST",
+        "/_internal/tick?force=1",
+        Some(&http.operator),
+        Some(json!({})),
+    );
+    let (a1, a2) = tokio::join!(one, two);
+    let (s1, b1) = a1?;
+    let (s2, b2) = a2?;
+    assert_eq!(s1, 200, "{b1}");
+    assert_eq!(s2, 200, "{b2}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&project.pref),
+            "GET",
+            &format!("/fn/v1/_admin/tasks/{id}"),
+            Some(&project.service),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let task: Value = serde_json::from_str(&body)?;
+    assert_eq!(task["status"], "done", "{body}");
+    assert_eq!(task["attempts"], 1, "{body}");
+    let ran = project_logs(&project.pref, "function", "echo").await?;
+    assert_eq!(ran.iter().filter(|(status, _)| *status == 200).count(), 2);
+
+    deploy_source(http, &project, "boom", BOOM_SOURCE).await?;
+    let file = format!("/tmp/reactor-dead-{}", Uuid::new_v4());
+    let _ = Command::new("docker")
+        .args(["exec", "reactor-v2-app", "rm", "-f", &file])
+        .status();
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&project.pref),
+            "POST",
+            "/fn/v1/boom/enqueue",
+            Some(&project.service),
+            Some(json!({"body": {"file": file}, "max_attempts": 1})),
+        )
+        .await?;
+    assert_eq!(status, 201, "{body}");
+    let dead_id = serde_json::from_str::<Value>(&body)?["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    force_tick(http).await?;
+    force_tick(http).await?;
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&project.pref),
+            "GET",
+            &format!("/fn/v1/_admin/tasks/{dead_id}"),
+            Some(&project.service),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let task: Value = serde_json::from_str(&body)?;
+    assert_eq!(task["status"], "dead", "{body}");
+    assert_eq!(task["attempts"], 1, "{body}");
+    let read = Command::new("docker")
+        .args(["exec", "reactor-v2-app", "cat", &file])
+        .output()?;
+    assert_eq!(String::from_utf8_lossy(&read.stdout).trim(), "x");
+    let failed = project_logs(&project.pref, "function", "boom").await?;
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].0, 500);
+    assert!(!failed[0].1.is_empty(), "{failed:?}");
+    Ok(())
+}
+
+async fn queue_gate(http: &Http) -> anyhow::Result<()> {
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "GET",
+            "/platform/v1/extensions",
+            Some(&http.operator),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"queue\""), "{body}");
+
+    let a = create_project(http, 18000).await?;
+    let b = create_project(http, 18000).await?;
+    deploy_source(http, &a, "echo", FN_SOURCE).await?;
+    deploy_source(http, &a, "boom", BOOM_SOURCE).await?;
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/queue/v1/queues",
+            Some(&a.service),
+            Some(json!({"name": "jobs"})),
+        )
+        .await?;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/queue/v1/queues/jobs/send",
+            Some(&a.service),
+            Some(json!({"message": {"n": 1}, "delay_secs": 0})),
+        )
+        .await?;
+    assert_eq!(status, 201, "{body}");
+    let msg_id = serde_json::from_str::<Value>(&body)?["msg_id"].as_i64().unwrap();
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/queue/v1/queues/jobs/read",
+            Some(&a.service),
+            Some(json!({"vt_secs": 30, "qty": 1})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"n\":1") || body.contains("\"n\": 1"), "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/queue/v1/queues/jobs/read",
+            Some(&a.service),
+            Some(json!({"vt_secs": 30, "qty": 1})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, "[]", "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/queue/v1/queues/jobs/delete",
+            Some(&a.service),
+            Some(json!({"msg_id": msg_id})),
+        )
+        .await?;
+    assert_eq!(status, 204, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/queue/v1/queues/jobs/read",
+            Some(&a.service),
+            Some(json!({"vt_secs": 1, "qty": 1})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, "[]", "{body}");
+
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&b.pref),
+            "GET",
+            "/queue/v1/queues/jobs/peek",
+            Some(&b.service),
+            None,
+        )
+        .await?;
+    assert!(status == 404 || body == "[]", "{status} {body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/queue/v1/queues",
+            Some(&a.anon),
+            Some(json!({"name": "nope"})),
+        )
+        .await?;
+    assert!(status == 401 || status == 403, "{status} {body}");
+
+    let dedicated = create_project(http, 18000).await?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PATCH",
+            &format!("/platform/v1/projects/{}", dedicated.pref),
+            Some(&http.operator),
+            Some(json!({"database_url": env("REACTOR_ACCEPT_PATCH_DATABASE_URL")})),
+        )
+        .await?;
+    assert_eq!(status, 204, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&dedicated.pref),
+            "POST",
+            "/queue/v1/queues",
+            Some(&dedicated.service),
+            Some(json!({"name": "remote"})),
+        )
+        .await?;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&dedicated.pref),
+            "POST",
+            "/queue/v1/queues/remote/send",
+            Some(&dedicated.service),
+            Some(json!({"message": {"where": "dedicated"}})),
+        )
+        .await?;
+    assert_eq!(status, 201, "{body}");
+    let dedicated_pool = PgPool::connect(&env("REACTOR_ACCEPT_DEDICATED_URL")).await?;
+    let n: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM \"proj_{}\".queue_messages WHERE message->>'where' = 'dedicated'",
+        dedicated.pref
+    ))
+    .fetch_one(&dedicated_pool)
+    .await?;
+    assert_eq!(n, 1);
+
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/queue/v1/queues/jobs/subscriptions",
+            Some(&a.service),
+            Some(json!({"function_name": "echo", "vt_secs": 5, "qty": 1, "max_reads": 3})),
+        )
+        .await?;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/queue/v1/queues/jobs/send",
+            Some(&a.service),
+            Some(json!({"message": {"hello": "echo"}})),
+        )
+        .await?;
+    assert_eq!(status, 201, "{body}");
+    force_tick(http).await?;
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "GET",
+            "/queue/v1/queues/jobs/peek",
+            Some(&a.service),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, "[]", "{body}");
+    let delivered = project_logs(&a.pref, "queue", "jobs:echo").await?;
+    assert!(
+        delivered.iter().any(|(status, message)| *status == 200 && message.is_empty()),
+        "{delivered:?}"
+    );
+    let echoed = project_logs(&a.pref, "function", "echo").await?;
+    assert!(echoed.iter().any(|(status, _)| *status == 200), "{echoed:?}");
+
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/queue/v1/queues",
+            Some(&a.service),
+            Some(json!({"name": "retries"})),
+        )
+        .await?;
+    assert_eq!(status, 201, "{body}");
+    let file = format!("/tmp/reactor-queue-{}", Uuid::new_v4());
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/queue/v1/queues/retries/subscriptions",
+            Some(&a.service),
+            Some(json!({"function_name": "boom", "vt_secs": 1, "qty": 1, "max_reads": 2})),
+        )
+        .await?;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/queue/v1/queues/retries/send",
+            Some(&a.service),
+            Some(json!({"message": {"file": file}})),
+        )
+        .await?;
+    assert_eq!(status, 201, "{body}");
+    force_tick(http).await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    force_tick(http).await?;
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "GET",
+            "/queue/v1/queues/retries/peek",
+            Some(&a.service),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, "[]", "{body}");
+    let archived: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM \"proj_{}\".queue_messages WHERE queue_name = 'retries' AND archived_at IS NOT NULL",
+        a.pref
+    ))
+    .fetch_one(&PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?)
+    .await?;
+    assert_eq!(archived, 1);
+    let attempts = project_logs(&a.pref, "queue", "retries:boom").await?;
+    assert_eq!(attempts.iter().filter(|(status, _)| *status == 500).count(), 2, "{attempts:?}");
+    let boomed = project_logs(&a.pref, "function", "boom").await?;
+    assert_eq!(
+        boomed.iter().filter(|(status, message)| *status == 500 && !message.is_empty()).count(),
+        2,
+        "{boomed:?}"
+    );
+
+    let dir = std::env::temp_dir().join(format!("reactor-queue-{}", a.pref));
+    std::fs::create_dir_all(&dir)?;
+    let bin = env("REACTOR_CLI");
+    let link = Command::new(&bin)
+        .args([
+            "link",
+            "--url",
+            "http://127.0.0.1:18000",
+            "--ref",
+            &a.pref,
+            "--service-key",
+            &a.service,
+        ])
+        .current_dir(&dir)
+        .status()?;
+    assert!(link.success());
+    let created = Command::new(&bin)
+        .args(["queue", "create", "cli"])
+        .current_dir(&dir)
+        .status()?;
+    assert!(created.success());
+    let sent = Command::new(&bin)
+        .args(["queue", "send", "cli", "{\"from\":\"cli\"}"])
+        .current_dir(&dir)
+        .status()?;
+    assert!(sent.success());
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "GET",
+            "/queue/v1/queues/cli/peek",
+            Some(&a.service),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("cli"), "{body}");
+    Ok(())
+}
+
 
 #[tokio::test]
 async fn project_role_owns_its_schema_and_nothing_else() {

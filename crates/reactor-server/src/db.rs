@@ -1,3 +1,4 @@
+use reactor_core::ExtensionSql;
 use sqlx::PgPool;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -30,12 +31,14 @@ pub async fn apply_project(
     sql_dir: &Path,
     project_id: Uuid,
     schema: &str,
+    extensions: &[ExtensionSql],
 ) -> anyhow::Result<()> {
     apply_project_owned(
         pool.clone(),
         sql_dir.to_path_buf(),
         project_id,
         schema.to_string(),
+        extensions.to_vec(),
     )
     .await
 }
@@ -45,6 +48,7 @@ async fn apply_project_owned(
     sql_dir: PathBuf,
     project_id: Uuid,
     schema: String,
+    extensions: Vec<ExtensionSql>,
 ) -> anyhow::Result<()> {
     let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\"");
     sqlx::raw_sql(&create_schema).execute(&pool).await?;
@@ -90,6 +94,28 @@ async fn apply_project_owned(
          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA \"{schema}\" TO authenticated, service"
     );
     exec_script(&pool, &grants).await?;
+    for file in &extensions {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM reactor.schema_migrations WHERE project_id = $1 AND version = $2",
+        )
+        .bind(project_id)
+        .bind(&file.version)
+        .fetch_one(&pool)
+        .await?;
+        if count > 0 {
+            continue;
+        }
+        let script = format!(
+            "SET search_path TO \"{schema}\";\n{}\nSET search_path TO public;",
+            file.body
+        );
+        sqlx::raw_sql(&script).execute(&pool).await?;
+        sqlx::query("INSERT INTO reactor.schema_migrations (project_id, version) VALUES ($1, $2)")
+            .bind(project_id)
+            .bind(&file.version)
+            .execute(&pool)
+            .await?;
+    }
     Ok(())
 }
 
@@ -174,6 +200,7 @@ pub async fn migrate_all(
     dedicated: Option<&PgPool>,
     sql_dir: &Path,
     dedicated_url: Option<&str>,
+    extensions: &[ExtensionSql],
     seal_key: &[u8; 32],
 ) -> anyhow::Result<()> {
     let primary = primary.clone();
@@ -199,7 +226,7 @@ pub async fn migrate_all(
             }
             None => primary.clone(),
         };
-        apply_project_owned(pool.clone(), sql_dir.clone(), id, schema).await?;
+        apply_project_owned(pool.clone(), sql_dir.clone(), id, schema, extensions.to_vec()).await?;
         crate::sql::ensure_project_role(&primary, &pool, seal_key, id, &pref).await?;
     }
     sync_schemas(&primary, dedicated.as_ref()).await?;

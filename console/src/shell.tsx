@@ -23,6 +23,7 @@ import {
   HardDrive,
   KeyRound,
   LayoutDashboard,
+  ListOrdered,
   LogOut,
   Plus,
   ScrollText,
@@ -75,6 +76,13 @@ export function Shell() {
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState("")
   const [operatorOpen, setOperatorOpen] = useState(false)
+  const [queueEnabled, setQueueEnabled] = useState(false)
+
+  useEffect(() => {
+    api<Array<{ name: string }>>("/console/v1/extensions")
+      .then((rows) => setQueueEnabled(rows.some((row) => row.name === "queue")))
+      .catch(() => setQueueEnabled(false))
+  }, [])
 
   useEffect(() => {
     function load() {
@@ -143,7 +151,10 @@ export function Shell() {
         <nav className="flex min-h-0 flex-1 flex-col gap-1 p-2">
           {ref
             ? <>
-                {sections.map((section) => (
+                {[
+                  ...sections,
+                  ...(queueEnabled ? [{ path: "queue", label: "Queue", icon: ListOrdered }] : []),
+                ].map((section) => (
                   <ProjectLink key={section.label} pref={ref} expanded={expanded} section={section} />
                 ))}
                 <div className="mt-auto flex flex-col gap-1">

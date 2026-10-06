@@ -1,10 +1,10 @@
-# Public HTTP API for Reactor v1.26.10-beta7.
+# Public HTTP API for Reactor v1.26.10-beta8.
 # The console API is operator-only and is specified in docs/operate/console.md.
 # /data/v1 is PostgREST. Use PostgREST's own OpenAPI for that surface.
 openapi: 3.0.3
 info:
   title: Reactor
-  version: 1.26.10-beta7
+  version: 1.26.10-beta8
   license:
     name: BUSL-1.1
     url: https://mariadb.com/bsl11/

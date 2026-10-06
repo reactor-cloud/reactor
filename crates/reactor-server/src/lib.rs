@@ -14,15 +14,17 @@ mod sites_proc;
 mod sql;
 
 use axum::body::Body;
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{FromRef, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
+use async_trait::async_trait;
 use reactor_auth::{
     constant_time_eq, hash_password, random_token, token_hash, verify_password, IdentityProvider,
     InternalIdentity, JwtIssuer,
 };
+use reactor_core::{Ctx, FnInvoke, Invoker, OpenedProject, ProjectError, Projects, Tasks};
 use reactor_functions::{
     scrub_env, zip_hash, AwsLambdaPublisher, BunRuntime, FakePublisher, FunctionPublisher,
 };
@@ -55,7 +57,17 @@ pub struct AppState {
     pub publisher: Arc<dyn FunctionPublisher>,
     pub http: reqwest::Client,
     pub sites: Arc<SiteSupervisor>,
+    pub extension_sql: Arc<Vec<reactor_core::ExtensionSql>>,
+    pub extensions: Arc<Vec<reactor_core::ExtensionInfo>>,
     pub project_pools: sql::ProjectPools,
+}
+
+pub type AppCtx = Ctx<AppState>;
+
+impl FromRef<AppCtx> for AppState {
+    fn from_ref(input: &AppCtx) -> Self {
+        input.app.clone()
+    }
 }
 
 pub struct ApiError {
@@ -250,15 +262,16 @@ pub async fn build_app(config: Config) -> anyhow::Result<Router> {
         PathBuf::from(&config.sites_workdir),
         std::time::Duration::from_secs(config.sites_idle_secs),
     ));
-    if config.mode != "lambda" {
-        let sweeper = sites.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                sweeper.sweep().await;
-            }
-        });
+    let mut kernel = reactor_core::Kernel::<AppState>::new();
+    kernel.install_core();
+    for name in &config.extensions {
+        match name.as_str() {
+            "queue" => reactor_ext_queue::register(&mut kernel),
+            other => anyhow::bail!("unknown extension {other}"),
+        }
     }
+    let extension_sql = Arc::new(std::mem::take(&mut kernel.sql));
+    let extension_info = Arc::new(std::mem::take(&mut kernel.info));
     let state = AppState {
         config: Arc::new(config),
         pool,
@@ -269,16 +282,84 @@ pub async fn build_app(config: Config) -> anyhow::Result<Router> {
         bun,
         publisher,
         http: reqwest::Client::new(),
-        sites,
+        sites: sites.clone(),
+        extension_sql,
+        extensions: extension_info,
         project_pools: sql::ProjectPools::default(),
     };
-    Ok(router(state))
+    let cron_state = state.clone();
+    kernel.hook(reactor_core::Hook {
+        name: "cron".into(),
+        every: std::time::Duration::from_secs(60),
+        run: Arc::new(move |_| {
+            let state = cron_state.clone();
+            Box::pin(async move {
+                run_cron(&state)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| err.text().to_string())
+            })
+        }),
+    });
+    kernel.hook(reactor_core::Hook {
+        name: "sites".into(),
+        every: std::time::Duration::from_secs(1),
+        run: Arc::new(move |_| {
+            let sites = sites.clone();
+            Box::pin(async move {
+                sites.sweep().await;
+                Ok(())
+            })
+        }),
+    });
+    let tasks = Tasks::new(state.pool.clone());
+    tasks
+        .register("fn.invoke", Arc::new(FnInvoke))
+        .await;
+    for (kind, handler) in std::mem::take(&mut kernel.handlers) {
+        tasks.register(kind, handler).await;
+    }
+    let ctx = AppCtx {
+        pool: state.pool.clone(),
+        blobs: state.blobs.clone(),
+        invoker: Arc::new(ServerInvoker {
+            state: state.clone(),
+        }),
+        tasks,
+        http: state.http.clone(),
+        extensions: state.extensions.clone(),
+        projects: Arc::new(ServerProjects {
+            state: state.clone(),
+        }),
+        log: Arc::new(ServerLog {
+            pool: state.pool.clone(),
+        }),
+        hooks: Arc::new(std::mem::take(&mut kernel.hooks)),
+        app: state.clone(),
+    };
+    if ctx.app.config.mode != "lambda" {
+        let clock = ctx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if let Err(err) = clock.tick(false).await {
+                    tracing::error!("tick: {err}");
+                }
+            }
+        });
+    }
+    let routes = std::mem::take(&mut kernel.routes);
+    Ok(router(ctx, routes))
 }
 
-pub fn router(state: AppState) -> Router {
+pub fn router(ctx: AppCtx, extra: Router<AppCtx>) -> Router {
+    let state = ctx.app.clone();
     let handler = state.config.handler.clone();
     let all = handler.is_empty();
-    let mut app = Router::new();
+    let mut app: Router<AppCtx> = Router::new();
+    if all || handler == "platform" || handler == "fn" {
+        app = app.route("/_internal/tick", post(tick_http));
+    }
     if all || handler == "platform" {
         app = app
             .route("/health", get(health))
@@ -288,7 +369,8 @@ pub fn router(state: AppState) -> Router {
             )
             .route("/platform/v1/projects/{pref}", patch(patch_project))
             .route("/platform/v1/migrate", post(migrate_http))
-            .route("/platform/v1/domains/{host}/verify", post(confirm_domain));
+            .route("/platform/v1/domains/{host}/verify", post(confirm_domain))
+            .route("/platform/v1/extensions", get(list_extensions));
     }
     if all {
         app = app.route("/data/v1/{*path}", axum::routing::any(proxy_data));
@@ -317,6 +399,8 @@ pub fn router(state: AppState) -> Router {
             .route("/fn/v1/_internal/cron", post(cron))
             .route("/fn/v1/_admin/functions/{name}", post(deploy_function))
             .route("/fn/v1/_admin/schedules", post(create_schedule))
+            .route("/fn/v1/_admin/tasks/{id}", get(task_status))
+            .route("/fn/v1/{name}/enqueue", post(enqueue_function))
             .route("/fn/v1/{name}", post(invoke_function));
     }
     if all || handler == "sites" {
@@ -343,12 +427,37 @@ pub fn router(state: AppState) -> Router {
         app = console::mount(app);
     }
     let app = app
+        .merge(extra)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             console::console_key_guard,
         ))
-        .with_state(state.clone());
+        .with_state(ctx);
     http_edge::wrap(app, state)
+}
+
+async fn list_extensions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    require_operator(&state, &headers)?;
+    Ok(Json(json!(state.extensions)))
+}
+
+#[derive(Deserialize)]
+struct TickQuery {
+    #[serde(default)]
+    force: i32,
+}
+
+async fn tick_http(
+    State(ctx): State<AppCtx>,
+    headers: HeaderMap,
+    Query(query): Query<TickQuery>,
+) -> Result<Json<Value>, ApiError> {
+    require_operator(&ctx.app, &headers)?;
+    let tasks = ctx.tick(query.force == 1).await.map_err(internal)?;
+    Ok(Json(json!({"ok": true, "tasks": tasks})))
 }
 
 async fn list_projects(
@@ -495,6 +604,7 @@ async fn create_project(
         std::path::Path::new(&state.config.sql_dir),
         id,
         &schema,
+        state.extension_sql.as_slice(),
     )
     .await
     .map_err(internal)?;
@@ -597,6 +707,7 @@ async fn patch_project(
         std::path::Path::new(&state.config.sql_dir),
         id,
         &pref.schema(),
+        state.extension_sql.as_slice(),
     )
     .await
     .map_err(internal)?;
@@ -670,6 +781,7 @@ async fn migrate_http(
             state.dedicated.as_ref(),
             std::path::Path::new(&state.config.sql_dir),
             state.config.dedicated_database_url.as_deref(),
+            state.extension_sql.as_slice(),
             state.issuer.seal_key(),
         )
         .await
@@ -687,6 +799,7 @@ async fn migrate_http(
         std::path::Path::new(&state.config.sql_dir),
         resolved.project_id,
         &format!("proj_{}", resolved.pref),
+        state.extension_sql.as_slice(),
     )
     .await
     .map_err(internal)?;
@@ -1458,6 +1571,83 @@ pub(crate) fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+#[derive(Deserialize)]
+struct EnqueueBody {
+    #[serde(default)]
+    body: Value,
+    #[serde(default)]
+    delay_secs: i64,
+    #[serde(default = "default_attempts")]
+    max_attempts: i32,
+}
+
+fn default_attempts() -> i32 {
+    3
+}
+
+async fn enqueue_function(
+    State(ctx): State<AppCtx>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(body): Json<EnqueueBody>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    if !valid_name(&name) || name.starts_with('_') {
+        return Err(ApiError::not_found());
+    }
+    if body.delay_secs < 0 || body.max_attempts < 1 {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "delay_secs and max_attempts must be positive",
+        ));
+    }
+    let resolved = resolve_project(&ctx.app, &headers, true).await?;
+    require_service(&resolved)?;
+    let run_at = chrono::Utc::now()
+        + chrono::Duration::seconds(body.delay_secs)
+        - chrono::Duration::seconds(if body.delay_secs == 0 { 1 } else { 0 });
+    let id = ctx
+        .tasks
+        .enqueue(
+            "fn.invoke",
+            Some(resolved.project_id),
+            json!({"name": name, "body": body.body}),
+            run_at,
+            body.max_attempts,
+            None,
+        )
+        .await
+        .map_err(|err| match err {
+            reactor_core::EnqueueError::Conflict => {
+                ApiError::new(StatusCode::CONFLICT, "duplicate task")
+            }
+            reactor_core::EnqueueError::Db(err) => internal(err),
+        })?;
+    Ok((StatusCode::CREATED, Json(json!({"id": id}))))
+}
+
+async fn task_status(
+    State(ctx): State<AppCtx>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let resolved = resolve_project(&ctx.app, &headers, true).await?;
+    require_service(&resolved)?;
+    let Some(task) = ctx.tasks.get(id).await.map_err(internal)? else {
+        return Err(ApiError::not_found());
+    };
+    if task.project_id != Some(resolved.project_id) {
+        return Err(ApiError::not_found());
+    }
+    Ok(Json(json!({
+        "id": task.id,
+        "kind": task.kind,
+        "status": task.status,
+        "attempts": task.attempts,
+        "max_attempts": task.max_attempts,
+        "last_error": task.last_error,
+    })))
+}
+
 async fn invoke_function(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1469,24 +1659,7 @@ async fn invoke_function(
     }
     let resolved = resolve_project(&state, &headers, true).await?;
     let caller = caller_json(&resolved);
-    let bytes = match run_function(&state, &resolved, &name, &caller, &body, None).await {
-        Ok(bytes) => {
-            console::record_log(&state.pool, resolved.project_id, "function", &name, 200, "").await;
-            bytes
-        }
-        Err(err) => {
-            console::record_log(
-                &state.pool,
-                resolved.project_id,
-                "function",
-                &name,
-                500,
-                "invoke failed",
-            )
-            .await;
-            return Err(err);
-        }
-    };
+    let bytes = run_function(&state, &resolved, &name, &caller, &body, None).await?;
     Ok(([(header::CONTENT_TYPE, "application/json")], bytes).into_response())
 }
 
@@ -1545,14 +1718,23 @@ pub(crate) async fn run_function(
             "caller": caller,
             "body": String::from_utf8_lossy(body),
         });
-        return state
+        return match state
             .publisher
             .invoke(
                 &format!("{}-{name}", resolved.pref),
                 event.to_string().as_bytes(),
             )
             .await
-            .map_err(internal);
+        {
+            Ok(bytes) => {
+                log_function(state, resolved.project_id, name, 200, "").await;
+                Ok(bytes)
+            }
+            Err(err) => {
+                log_function(state, resolved.project_id, name, 500, &err.to_string()).await;
+                Err(internal(err))
+            }
+        };
     }
     let dest = PathBuf::from(&state.config.functions_workdir)
         .join(&resolved.pref)
@@ -1563,11 +1745,20 @@ pub(crate) async fn run_function(
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
-    state
-        .bun
-        .invoke(&dest, caller, body, &pairs)
-        .await
-        .map_err(internal)
+    match state.bun.invoke(&dest, caller, body, &pairs).await {
+        Ok(bytes) => {
+            log_function(state, resolved.project_id, name, 200, "").await;
+            Ok(bytes)
+        }
+        Err(err) => {
+            log_function(state, resolved.project_id, name, 500, &err.to_string()).await;
+            Err(internal(err))
+        }
+    }
+}
+
+async fn log_function(state: &AppState, project_id: Uuid, name: &str, status: i32, message: &str) {
+    console::record_log(&state.pool, project_id, "function", name, status, message).await;
 }
 
 #[derive(Deserialize)]
@@ -1604,6 +1795,10 @@ async fn create_schedule(
 
 async fn cron(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
     require_operator(&state, &headers)?;
+    Ok(Json(run_cron(&state).await?))
+}
+
+pub(crate) async fn run_cron(state: &AppState) -> Result<Value, ApiError> {
     let mut tx = state.pool.begin().await.map_err(internal)?;
     let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(4_815_162_342_i64)
@@ -1611,7 +1806,7 @@ async fn cron(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<
         .await
         .map_err(internal)?;
     if !locked {
-        return Ok(Json(json!({"ran": false})));
+        return Ok(json!({"ran": false}));
     }
     let due: Vec<(Uuid, Uuid, String, String)> = sqlx::query_as(
         "SELECT id, project_id, function_name, body FROM reactor.schedules WHERE next_run <= now()",
@@ -1650,7 +1845,7 @@ async fn cron(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<
         ran += 1;
     }
     tx.commit().await.map_err(internal)?;
-    Ok(Json(json!({"ran": true, "count": ran})))
+    Ok(json!({"ran": true, "count": ran}))
 }
 
 async fn upload_site(
@@ -2154,30 +2349,7 @@ async fn site_fallback(State(state): State<AppState>, req: Request) -> Result<Re
     .map_err(internal)?;
     if let Some(name) = function {
         let caller = json!({"sub": "site", "ref": project.pref, "role": "anon"});
-        let bytes = match run_function(&state, &project, &name, &caller, b"", None).await {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                console::record_log(
-                    &state.pool,
-                    project.project_id,
-                    "function",
-                    &name,
-                    500,
-                    "site route failed",
-                )
-                .await;
-                return Err(err);
-            }
-        };
-        console::record_log(
-            &state.pool,
-            project.project_id,
-            "function",
-            &name,
-            200,
-            "site route",
-        )
-        .await;
+        let bytes = run_function(&state, &project, &name, &caller, b"", None).await?;
         return Ok(([(header::CONTENT_TYPE, "application/json")], bytes).into_response());
     }
     console::record_log(&state.pool, project.project_id, "site", &path, 404, "").await;
@@ -2328,6 +2500,127 @@ async fn load_project(state: &AppState, pref: &str) -> Result<Resolved, ApiError
         database_url,
         identity: None,
     })
+}
+
+struct ServerInvoker {
+    state: AppState,
+}
+
+#[async_trait]
+impl Invoker for ServerInvoker {
+    async fn invoke(
+        &self,
+        project_id: Uuid,
+        name: String,
+        body: Vec<u8>,
+    ) -> Result<Vec<u8>, String> {
+        let (pref, database_url): (String, Option<String>) = sqlx::query_as(
+            "SELECT ref, database_url FROM reactor.projects WHERE id = $1",
+        )
+        .bind(project_id)
+        .fetch_one(&self.state.pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        let resolved = Resolved {
+            project_id,
+            pref: pref.clone(),
+            database_url,
+            identity: Some(Identity {
+                project_id,
+                project_ref: ProjectRef::parse(&pref).map_err(|err| err.to_string())?,
+                user_id: None,
+                role: Role::Service,
+                claims: json!({"sub": "service", "role": "service"}),
+            }),
+        };
+        let caller = json!({"sub": "service", "ref": pref, "role": "service"});
+        run_function(&self.state, &resolved, &name, &caller, &body, None)
+            .await
+            .map_err(|err| err.text().to_string())
+    }
+}
+
+struct ServerLog {
+    pool: sqlx::PgPool,
+}
+
+#[async_trait]
+impl reactor_core::ProjectLog for ServerLog {
+    async fn record(
+        &self,
+        project_id: Uuid,
+        kind: String,
+        name: String,
+        status: i32,
+        message: String,
+    ) {
+        console::record_log(&self.pool, project_id, &kind, &name, status, &message).await;
+    }
+}
+
+struct ServerProjects {
+    state: AppState,
+}
+
+#[async_trait]
+impl Projects for ServerProjects {
+    async fn open_service(
+        &self,
+        authorization: Option<String>,
+        host: Option<String>,
+    ) -> Result<OpenedProject, ProjectError> {
+        let mut headers = HeaderMap::new();
+        if let Some(value) = authorization {
+            let Ok(parsed) = value.parse() else {
+                return Err(ProjectError::Unauthorized);
+            };
+            headers.insert(header::AUTHORIZATION, parsed);
+        }
+        if let Some(value) = host {
+            let Ok(parsed) = value.parse() else {
+                return Err(ProjectError::Unauthorized);
+            };
+            headers.insert(header::HOST, parsed);
+        }
+        let resolved = match resolve_project(&self.state, &headers, true).await {
+            Ok(resolved) => resolved,
+            Err(err) if err.status == StatusCode::FORBIDDEN => return Err(ProjectError::Forbidden),
+            Err(_) => return Err(ProjectError::Unauthorized),
+        };
+        if require_service(&resolved).is_err() {
+            return Err(ProjectError::Forbidden);
+        }
+        let pool = pool_for(&self.state, resolved.database_url.as_deref())
+            .await
+            .map_err(|err| ProjectError::Unavailable(err.to_string()))?;
+        Ok(OpenedProject {
+            id: resolved.project_id,
+            pref: resolved.pref.clone(),
+            schema: format!("proj_{}", resolved.pref),
+            pool,
+        })
+    }
+
+    async fn list(&self) -> Result<Vec<OpenedProject>, ProjectError> {
+        let rows: Vec<(Uuid, String, Option<String>)> =
+            sqlx::query_as("SELECT id, ref, database_url FROM reactor.projects ORDER BY ref")
+                .fetch_all(&self.state.pool)
+                .await
+                .map_err(|err| ProjectError::Unavailable(err.to_string()))?;
+        let mut out = Vec::new();
+        for (id, pref, url) in rows {
+            let pool = pool_for(&self.state, url.as_deref())
+                .await
+                .map_err(|err| ProjectError::Unavailable(err.to_string()))?;
+            out.push(OpenedProject {
+                id,
+                pref: pref.clone(),
+                schema: format!("proj_{pref}"),
+                pool,
+            });
+        }
+        Ok(out)
+    }
 }
 
 pub async fn router_from_env() -> anyhow::Result<Router> {

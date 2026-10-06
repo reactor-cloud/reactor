@@ -17,7 +17,7 @@ use webauthn_rs::prelude::{
     RegisterPublicKeyCredential, Url, Webauthn, WebauthnBuilder,
 };
 
-pub fn mount(app: Router<AppState>) -> Router<AppState> {
+pub fn mount(app: Router<crate::AppCtx>) -> Router<crate::AppCtx> {
     app.route("/auth/v1/factors/totp/start", post(totp_start))
         .route("/auth/v1/factors/totp/confirm", post(totp_confirm))
         .route(

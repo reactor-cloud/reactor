@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-pub fn mount(app: Router<AppState>) -> Router<AppState> {
+pub fn mount(app: Router<crate::AppCtx>) -> Router<crate::AppCtx> {
     app.route(
         "/console/v1/cluster/email",
         get(get_cluster).put(put_cluster),

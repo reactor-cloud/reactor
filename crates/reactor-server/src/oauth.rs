@@ -104,7 +104,7 @@ fn find_spec(id: &str) -> Option<&'static Spec> {
     catalog().iter().find(|spec| spec.id == id)
 }
 
-pub fn mount(app: Router<AppState>) -> Router<AppState> {
+pub fn mount(app: Router<crate::AppCtx>) -> Router<crate::AppCtx> {
     app.route("/auth/v1/authorize", get(authorize)).route(
         "/auth/v1/callback/{provider}",
         get(callback_get).post(callback_post),

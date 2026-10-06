@@ -43,6 +43,7 @@ pub struct Config {
     pub agent_base_url: String,
     pub agent_model: String,
     pub agent_turn_deadline_secs: u64,
+    pub extensions: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -300,8 +301,17 @@ impl Config {
             agent_turn_deadline_secs: pick("REACTOR_AGENT__TURN_DEADLINE_SECONDS", None, "180")
                 .parse()
                 .unwrap_or(180),
+            extensions: split_csv(&pick("REACTOR_EXTENSIONS", None, "")),
         }
     }
+}
+
+fn split_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect()
 }
 
 fn default_sql_dir() -> String {

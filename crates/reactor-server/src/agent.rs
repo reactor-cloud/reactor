@@ -26,7 +26,7 @@ const SECRET_KEYS: &[&str] = &[
     "authorization",
 ];
 
-pub fn mount(app: Router<AppState>) -> Router<AppState> {
+pub fn mount(app: Router<crate::AppCtx>) -> Router<crate::AppCtx> {
     app.route(
         "/console/v1/agent/threads",
         get(list_threads).post(create_thread),
@@ -900,6 +900,7 @@ async fn create_project(
         std::path::Path::new(&state.config.sql_dir),
         id,
         &format!("proj_{pref}"),
+        state.extension_sql.as_slice(),
     )
     .await
     .map_err(|err| err.to_string())?;

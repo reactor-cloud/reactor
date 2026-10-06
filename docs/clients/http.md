@@ -30,6 +30,7 @@ No project. The operator token is not a project key.
 | Method | Path | Who | Effect |
 | --- | --- | --- | --- |
 | `GET` | `/health` | anyone | Postgres and the blob store are reachable |
+| `GET` | `/platform/v1/extensions` | operator | Extensions enabled on this cluster, `{ name, routes }[]` |
 | `GET` | `/platform/v1/projects` | operator | List refs |
 | `POST` | `/platform/v1/projects` | operator | Create a project. Returns ref, anon key, service key |
 | `PATCH` | `/platform/v1/projects/{ref}` | operator | Update the project row |
@@ -88,9 +89,16 @@ Creating a project with the operator token returns the keys once:
 | `POST` | `/storage/v1/object/presign` | a project token. Body `{ bucket, key, method }` |
 | `GET` or `PUT` | `/storage/v1/signed` | the signature on the query string |
 | `POST` | `/fn/v1/{name}` | a project token. Body is stdin. Names starting with `_` are not public |
+| `POST` | `/fn/v1/{name}/enqueue` | service key. `{ body, delay_secs, max_attempts }` → 201 `{ id }` |
+| `GET` | `/fn/v1/_admin/tasks/{id}` | service key, same project. `{ id, kind, status, attempts, max_attempts, last_error }` |
 | `POST` | `/fn/v1/_admin/functions/{name}` | service key. Body is a zip. `?promote=false` keeps the previous version live |
 | `POST` | `/fn/v1/_admin/schedules` | service key. `{ function_name, body }` |
 | `POST` | `/fn/v1/_internal/cron` | operator token |
+| `POST` | `/_internal/tick` | operator token. `?force=1` ignores hook intervals |
+
+## Queue
+
+Only when `REACTOR_EXTENSIONS` includes `queue`. Service key. The routes and bodies are on [Queue](/product/queue/).
 
 ## Sites
 

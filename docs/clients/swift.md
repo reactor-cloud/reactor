@@ -5,10 +5,10 @@ description: ReactorClient for iOS 17 and macOS 14. Auth, queries, storage, and 
 
 The Swift client is for iOS and macOS apps. It covers the same four surfaces as the JavaScript client: auth, a query builder for Postgres, file storage, and functions. The query builder is smaller than PostgREST. Use HTTP when you need embeds, `or`, or a range this builder does not express.
 
-Add the package from GitHub. The release is the git tag `v1.26.09-beta.2`. There is no second registry. The tag is not valid semver because of the `09`, so pin that tag rather than a version range. The product name is `Reactor`. It builds for iOS 17 and macOS 14.
+Add the package from GitHub. The release is the git tag `v1.26.10-beta8`. There is no second registry. Pin that tag. The product name is `Reactor`. It builds for iOS 17 and macOS 14.
 
 ```swift
-.package(url: "https://github.com/reactor-cloud/reactor-swift", exact: "1.26.09-beta.2")
+.package(url: "https://github.com/reactor-cloud/reactor-swift", exact: "1.26.10-beta8")
 ```
 
 ```swift
@@ -77,3 +77,23 @@ let result = try await reactor.functions.invoke("ping", body: .object(["hello": 
 ```
 
 Upload and download presign, then call the signed URL. `upload` finishes when the PUT succeeds. `download` returns the bytes. `invoke` returns the function’s JSON. A ping that echoes its body comes back as an object with `hello` set to `world`.
+
+## Queue and enqueue
+
+Construct the client with the service key. `enqueue` is always available. `queue` needs [the extension](/product/extensions/).
+
+```swift
+let task = try await reactor.functions.enqueue(
+  "ping",
+  body: .object(["ok": .bool(true)]),
+  delaySecs: 0,
+  maxAttempts: 3
+)
+let status = try await reactor.functions.task(task["id"]?.string() ?? "")
+
+try await reactor.queue.create("jobs")
+let sent = try await reactor.queue.send("jobs", message: .object(["hello": .string("world")]))
+try await reactor.queue.subscribe("jobs", functionName: "echo", vtSecs: 30, qty: 1, maxReads: 3)
+```
+
+`task` is `{ id, kind, status, attempts, max_attempts, last_error }`. `read` and `peek` return message rows. `peek` does not hide the message.

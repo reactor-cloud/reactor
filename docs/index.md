@@ -7,7 +7,7 @@ Reactor is a Rust backend for web and mobile apps. One server gives you auth, Po
 
 A project you create on your machine uses the same client URLs it will use on any other cluster. The JavaScript client follows the same shape as the Supabase client, so an app written against `createClient`, `auth`, and `from()` can move with small changes.
 
-**v1.26.10-beta7.** Package version `1.26.10-beta7`. The API can still change before a stable tag.
+**v1.26.10-beta8.** Package version `1.26.10-beta8`. The API can still change before a stable tag.
 
 ## Install
 
@@ -35,7 +35,8 @@ Swift and Kotlin are documented under [Clients](/clients/javascript/).
 | Auth | `/auth/v1` | Users, sessions, magic links, recovery, invites |
 | Data | `/data/v1` | PostgREST, with row-level security |
 | Storage | `/storage/v1` | Presigned uploads and downloads |
-| Functions | `/fn/v1` | Bun or Lambda, with versions and pins |
+| Functions | `/fn/v1` | Bun or Lambda, with versions, pins, and enqueue |
+| Queue | `/queue/v1` | Optional. Messages delivered to functions. `REACTOR_EXTENSIONS=queue` |
 | Sites | project host | Static files, a site process, or a function path |
 | Console | `/console` | Cluster admin. Separate from project users |
 
@@ -49,7 +50,7 @@ The [todos example](/examples/todos/) is a static site, a table with row-level s
 
 ## Not included
 
-Realtime, analytics, and billing are not part of this release. There is no SQL editor and no second data API. Console MFA is for operators. Project users can verify email, enroll a second factor, and sign in with a configured OAuth provider. Hosted Reactor is not open yet. [Self-host](/operate/self-hosting/) the server, or follow the [quickstart](/start/quickstart/).
+Realtime, analytics, and billing are not part of this release. Data stays on PostgREST. Console MFA is for operators. Project users can verify email, enroll a second factor, and sign in with a configured OAuth provider. Hosted Reactor is not open yet. [Self-host](/operate/self-hosting/) the server, or follow the [quickstart](/start/quickstart/).
 
 ## License
 

@@ -12,6 +12,7 @@ import { Home, Keys, Login, Setup, Team, UserDetail, Users } from "@/pages"
 import { ServiceKeys } from "@/service-keys"
 import { Settings } from "@/settings"
 import { Sites } from "@/sites"
+import { Queue } from "@/queue"
 import { Shell } from "@/shell"
 import { Storage } from "@/storage"
 
@@ -49,6 +50,7 @@ export default function App() {
           <Route path="p/:ref/functions" element={<Functions />} />
           <Route path="p/:ref/functions/:name" element={<Functions />} />
           <Route path="p/:ref/functions/:name/:section" element={<Functions />} />
+          <Route path="p/:ref/queue" element={<Queue />} />
           <Route path="p/:ref/sites" element={<Sites />} />
           <Route path="p/:ref/sites/:section" element={<Sites />} />
           <Route path="p/:ref/logs" element={<Logs />} />

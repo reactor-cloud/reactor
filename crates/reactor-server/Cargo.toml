@@ -11,6 +11,8 @@ reactor-storage = { path = "../reactor-storage" }
 reactor-functions = { path = "../reactor-functions" }
 reactor-sites = { path = "../reactor-sites" }
 reactor-email = { path = "../reactor-email" }
+reactor-core = { path = "../reactor-core" }
+reactor-ext-queue = { path = "../reactor-ext-queue" }
 tokio = { workspace = true }
 axum = { workspace = true, features = ["macros"] }
 serde = { workspace = true }
@@ -38,6 +40,7 @@ jsonwebtoken = { workspace = true }
 toml = "0.8"
 totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
 url = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 pg_query = "6.2"
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
 

@@ -13,12 +13,12 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-pub fn mount(app: Router<AppState>) -> Router<AppState> {
+pub fn mount(app: Router<crate::AppCtx>) -> Router<crate::AppCtx> {
     app.route("/auth/v1/verify-email", post(verify_email))
         .route("/auth/v1/verify-email/send", post(resend))
 }
 
-pub fn mount_console(app: Router<AppState>) -> Router<AppState> {
+pub fn mount_console(app: Router<crate::AppCtx>) -> Router<crate::AppCtx> {
     app.route(
         "/console/v1/projects/{pref}/auth",
         get(get_settings).put(put_settings),

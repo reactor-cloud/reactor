@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-pub fn mount(app: Router<AppState>) -> Router<AppState> {
+pub fn mount(app: Router<crate::AppCtx>) -> Router<crate::AppCtx> {
     app.route("/auth/v1/magic-link", post(magic_link))
         .route("/auth/v1/verify", post(verify))
         .route("/auth/v1/recover", post(recover))

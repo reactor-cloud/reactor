@@ -5,11 +5,11 @@ description: ReactorClient for Android and the JVM. Auth, queries, storage, and 
 
 The Kotlin client is for Android and other JVM apps. It covers auth, a small query builder, file storage, and functions. The query builder is enough for the first screens of an app. Use HTTP for the rest of PostgREST.
 
-The coordinates are `sl.atomicollabs.reactor:reactor-client:1.26.9-beta.2`. The git tag is `v1.26.09-beta.2` on [reactor-cloud/reactor-kotlin](https://github.com/reactor-cloud/reactor-kotlin). Publishing to Maven Central still needs that portal’s token and a GPG key. Until those are in place, build the module from the repository.
+The coordinates are `sl.atomicollabs.reactor:reactor-client:1.26.10-beta8`. The git tag is `v1.26.10-beta8` on [reactor-cloud/reactor-kotlin](https://github.com/reactor-cloud/reactor-kotlin). Publishing to Maven Central still needs that portal’s token and a GPG key. Until those are in place, build the module from the repository.
 
 ```kotlin
 dependencies {
-    implementation("sl.atomicollabs.reactor:reactor-client:1.26.9-beta.2")
+    implementation("sl.atomicollabs.reactor:reactor-client:1.26.10-beta8")
 }
 ```
 
@@ -60,3 +60,18 @@ val result = reactor.functions.invoke("ping")
 ```
 
 `execute()` returns the JSON from PostgREST. `.select()` after insert asks for the stored row, so `inserted` is that row rather than an empty body. `upload` presigns a PUT and sends the bytes. `download` returns the file bytes. `invoke` without a body posts `{}` and returns the function’s JSON. A ping with no extra fields still returns whatever `index.ts` writes to stdout.
+
+## Queue and enqueue
+
+Construct the client with the service key. `enqueue` is always available. `queue` needs [the extension](/product/extensions/).
+
+```kotlin
+val task = reactor.functions.enqueue("ping", JSONObject().put("ok", true), delaySecs = 0, maxAttempts = 3)
+val status = reactor.functions.task(task.getString("id"))
+
+reactor.queue.create("jobs")
+val sent = reactor.queue.send("jobs", JSONObject().put("hello", "world"))
+reactor.queue.subscribe("jobs", "echo", vtSecs = 30, qty = 1, maxReads = 3)
+```
+
+`task` is `{ id, kind, status, attempts, max_attempts, last_error }`. `read` and `peek` return a `JSONArray` of message rows. `peek` does not hide the message.
