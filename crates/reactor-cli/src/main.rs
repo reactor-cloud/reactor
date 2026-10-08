@@ -194,7 +194,9 @@ enum FunctionsCmd {
 #[derive(Subcommand)]
 enum QueueCmd {
     List,
-    Create { name: String },
+    Create {
+        name: String,
+    },
     Send {
         name: String,
         message: String,
@@ -365,11 +367,7 @@ async fn main() -> anyhow::Result<()> {
                 message,
                 delay_secs,
             } => queue_send(&name, &message, delay_secs).await,
-            QueueCmd::Read {
-                name,
-                vt_secs,
-                qty,
-            } => queue_read(&name, vt_secs, qty).await,
+            QueueCmd::Read { name, vt_secs, qty } => queue_read(&name, vt_secs, qty).await,
         },
         Cmd::Sql {
             file,
@@ -687,7 +685,8 @@ async fn queue_create(name: &str) -> anyhow::Result<()> {
 }
 
 async fn queue_send(name: &str, message: &str, delay_secs: i64) -> anyhow::Result<()> {
-    let message: Value = serde_json::from_str(message).unwrap_or_else(|_| Value::String(message.to_string()));
+    let message: Value =
+        serde_json::from_str(message).unwrap_or_else(|_| Value::String(message.to_string()));
     let body = service_call(
         "POST",
         &format!("/queue/v1/queues/{name}/send"),
@@ -1522,6 +1521,7 @@ async fn deploy() -> anyhow::Result<()> {
             .get("id")
             .and_then(|v| v.as_str())
             .context("deployment id missing")?;
+        let base = project.url.trim_end_matches('/');
         for file in walkdir::WalkDir::new(site)
             .into_iter()
             .filter_map(|e| e.ok())
@@ -1535,30 +1535,15 @@ async fn deploy() -> anyhow::Result<()> {
                 .to_string_lossy()
                 .replace('\\', "/");
             let bytes = fs::read(file.path())?;
-            let res = client
-                .put(format!(
-                    "{}/sites/v1/deployments/{id}/files/{rel}",
-                    project.url.trim_end_matches('/')
-                ))
-                .bearer_auth(&key)
-                .body(bytes)
-                .send()
-                .await?;
-            if !res.status().is_success() {
+            if let Err(err) = put_deployment_file(&client, base, &key, id, &rel, bytes).await {
                 let message = format!("upload {rel} failed");
                 let _ = client
-                    .post(format!(
-                        "{}/sites/v1/deployments/{id}/fail",
-                        project.url.trim_end_matches('/')
-                    ))
+                    .post(format!("{base}/sites/v1/deployments/{id}/fail"))
                     .bearer_auth(&key)
                     .json(&json!({ "error": message }))
                     .send()
                     .await;
-                anyhow::bail!(
-                    "site {rel} failed: {}",
-                    res.text().await.unwrap_or_default()
-                );
+                return Err(err);
             }
         }
         let finished = client
@@ -1575,6 +1560,71 @@ async fn deploy() -> anyhow::Result<()> {
                 finished.text().await.unwrap_or_default()
             );
         }
+    }
+    Ok(())
+}
+
+async fn put_deployment_file(
+    client: &reqwest::Client,
+    base: &str,
+    key: &str,
+    id: &str,
+    rel: &str,
+    bytes: Vec<u8>,
+) -> anyhow::Result<()> {
+    let ticket = client
+        .post(format!("{base}/sites/v1/deployments/{id}/files/{rel}"))
+        .bearer_auth(key)
+        .send()
+        .await?;
+    if !ticket.status().is_success() {
+        anyhow::bail!(
+            "upload {rel} failed: {}",
+            ticket.text().await.unwrap_or_default()
+        );
+    }
+    let ticket: Value = ticket.json().await?;
+    let url = ticket
+        .get("url")
+        .and_then(|v| v.as_str())
+        .context("upload url missing")?;
+    let fallback = ticket
+        .get("fallback")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let presigned = client.put(url).body(bytes.clone()).send().await?;
+    if !presigned.status().is_success() {
+        if bytes.len() > reactor_sites::SITE_BODY_LIMIT || fallback.is_empty() || fallback == url {
+            anyhow::bail!(
+                "upload {rel} failed: {}",
+                presigned.text().await.unwrap_or_default()
+            );
+        }
+        let fallback_res = client
+            .put(fallback)
+            .bearer_auth(key)
+            .body(bytes)
+            .send()
+            .await?;
+        if !fallback_res.status().is_success() {
+            anyhow::bail!(
+                "upload {rel} failed: {}",
+                fallback_res.text().await.unwrap_or_default()
+            );
+        }
+    }
+    let confirmed = client
+        .post(format!(
+            "{base}/sites/v1/deployments/{id}/files/{rel}/confirm"
+        ))
+        .bearer_auth(key)
+        .send()
+        .await?;
+    if !confirmed.status().is_success() {
+        anyhow::bail!(
+            "upload {rel} failed: {}",
+            confirmed.text().await.unwrap_or_default()
+        );
     }
     Ok(())
 }
@@ -1663,15 +1713,9 @@ mod context_tests {
 
     #[test]
     fn sql_flags_build_a_read_only_request() {
-        let cli = Cli::try_parse_from([
-            "reactor",
-            "sql",
-            "--file",
-            "q.sql",
-            "--write",
-            "--confirm",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["reactor", "sql", "--file", "q.sql", "--write", "--confirm"])
+                .unwrap();
         match cli.cmd {
             Cmd::Sql {
                 file,

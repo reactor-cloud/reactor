@@ -147,6 +147,21 @@ if grep -q 'from-aws-b' "$STATE/site-a.txt"; then
   exit 1
 fi
 
+big="$(mktemp -d)"
+mkdir -p "$big/site"
+dd if=/dev/zero bs=1048576 count=3 of="$big/site/big.bin" status=none
+printf 'big-ok\n' >"$big/site/index.html"
+(
+  cd "$big"
+  "$CLI" projects create aws-big --link
+  big_ref="$(python3 -c 'import pathlib,re; text=pathlib.Path("reactor.toml").read_text(); print(re.search(r"ref = \"([a-z0-9]+)\"", text).group(1))')"
+  printf '%s\n' "$big_ref" >"$STATE/big-ref"
+  "$CLI" deploy
+)
+big_ref="$(cat "$STATE/big-ref")"
+big_len="$(curl -sf -H "Host: ${big_ref}.${BASE_DOMAIN}" "$ALB_URL/big.bin" | wc -c | tr -d ' ')"
+[[ "$big_len" == "3145728" ]]
+
 nodework="$(mktemp -d)"
 cat >"$nodework/server.js" <<'EOF'
 const http = require("http");

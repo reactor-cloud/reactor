@@ -13,13 +13,13 @@ mod project_auth;
 mod sites_proc;
 mod sql;
 
+use async_trait::async_trait;
 use axum::body::Body;
-use axum::extract::{FromRef, Path, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRef, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
-use async_trait::async_trait;
 use reactor_auth::{
     constant_time_eq, hash_password, random_token, token_hash, verify_password, IdentityProvider,
     InternalIdentity, JwtIssuer,
@@ -30,7 +30,8 @@ use reactor_functions::{
 };
 use reactor_identity::{project_ref_from_host, Identity, ProjectRef, Role};
 use reactor_sites::{
-    content_type_for, expected_txt, safe_site_path, txt_from_doh, txt_matches, verification_name,
+    content_type_for, expected_txt, safe_site_path, site_upload_target, txt_from_doh, txt_matches,
+    verification_name, SITE_BODY_LIMIT,
 };
 use reactor_storage::{object_key, verify_signature, BlobStore, FsStore, S3Store};
 use serde::{Deserialize, Serialize};
@@ -313,9 +314,7 @@ pub async fn build_app(config: Config) -> anyhow::Result<Router> {
         }),
     });
     let tasks = Tasks::new(state.pool.clone());
-    tasks
-        .register("fn.invoke", Arc::new(FnInvoke))
-        .await;
+    tasks.register("fn.invoke", Arc::new(FnInvoke)).await;
     for (kind, handler) in std::mem::take(&mut kernel.handlers) {
         tasks.register(kind, handler).await;
     }
@@ -352,10 +351,19 @@ pub async fn build_app(config: Config) -> anyhow::Result<Router> {
     Ok(router(ctx, routes))
 }
 
+fn site_body_limit(mode: &str) -> usize {
+    if mode == "lambda" {
+        2 * 1024 * 1024
+    } else {
+        SITE_BODY_LIMIT
+    }
+}
+
 pub fn router(ctx: AppCtx, extra: Router<AppCtx>) -> Router {
     let state = ctx.app.clone();
     let handler = state.config.handler.clone();
     let all = handler.is_empty();
+    let upload_limit = site_body_limit(&state.config.mode);
     let mut app: Router<AppCtx> = Router::new();
     if all || handler == "platform" || handler == "fn" {
         app = app.route("/_internal/tick", post(tick_http));
@@ -392,7 +400,12 @@ pub fn router(ctx: AppCtx, extra: Router<AppCtx>) -> Router {
     if all || handler == "storage" {
         app = app
             .route("/storage/v1/object/presign", post(presign))
-            .route("/storage/v1/signed", get(signed_get).put(signed_put));
+            .route(
+                "/storage/v1/signed",
+                get(signed_get)
+                    .put(signed_put)
+                    .layer(DefaultBodyLimit::max(upload_limit)),
+            );
     }
     if all || handler == "fn" {
         app = app
@@ -405,11 +418,16 @@ pub fn router(ctx: AppCtx, extra: Router<AppCtx>) -> Router {
     }
     if all || handler == "sites" {
         app = app
-            .route("/sites/v1/files/{*path}", put(upload_site))
+            .route(
+                "/sites/v1/files/{*path}",
+                put(upload_site).layer(DefaultBodyLimit::max(upload_limit)),
+            )
             .route("/sites/v1/deployments", post(start_deployment))
             .route(
                 "/sites/v1/deployments/{id}/files/{*path}",
-                put(upload_deployment_file),
+                put(upload_deployment_file)
+                    .post(post_deployment_file)
+                    .layer(DefaultBodyLimit::max(upload_limit)),
             )
             .route("/sites/v1/deployments/{id}/finish", post(finish_deployment))
             .route("/sites/v1/env", get(get_site_env).put(put_site_env))
@@ -608,15 +626,9 @@ async fn create_project(
     )
     .await
     .map_err(internal)?;
-    sql::ensure_project_role(
-        &state.pool,
-        &state.pool,
-        state.issuer.seal_key(),
-        id,
-        &pref,
-    )
-    .await
-    .map_err(internal)?;
+    sql::ensure_project_role(&state.pool, &state.pool, state.issuer.seal_key(), id, &pref)
+        .await
+        .map_err(internal)?;
     let anon = state
         .issuer
         .sign(&pref, "anon", "anon", 60 * 60 * 24 * 365 * 10)
@@ -1602,8 +1614,7 @@ async fn enqueue_function(
     }
     let resolved = resolve_project(&ctx.app, &headers, true).await?;
     require_service(&resolved)?;
-    let run_at = chrono::Utc::now()
-        + chrono::Duration::seconds(body.delay_secs)
+    let run_at = chrono::Utc::now() + chrono::Duration::seconds(body.delay_secs)
         - chrono::Duration::seconds(if body.delay_secs == 0 { 1 } else { 0 });
     let id = ctx
         .tasks
@@ -1906,37 +1917,82 @@ async fn upload_deployment_file(
     let resolved = resolve_project(&state, &headers, true).await?;
     require_service(&resolved)?;
     let path = safe_site_path(&path).ok_or_else(|| ApiError::forbidden("invalid path"))?;
+    require_building(&state, id, resolved.project_id).await?;
+    let key = deployment_blob_key(&resolved.pref, id, &path)?;
+    state
+        .blobs
+        .put(&key, body, content_type_for(&path))
+        .await
+        .map_err(internal)?;
+    record_deployment_file(&state, id, &path, &key).await?;
+    Ok(StatusCode::CREATED)
+}
+
+async fn post_deployment_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, path)): Path<(Uuid, String)>,
+) -> Result<Response, ApiError> {
+    let resolved = resolve_project(&state, &headers, true).await?;
+    require_service(&resolved)?;
+    let (path, confirm) =
+        site_upload_target(&path).ok_or_else(|| ApiError::forbidden("invalid path"))?;
+    require_building(&state, id, resolved.project_id).await?;
+    let key = deployment_blob_key(&resolved.pref, id, &path)?;
+    if confirm {
+        if state.blobs.head(&key).await.map_err(internal)?.is_none() {
+            return Err(ApiError::not_found());
+        }
+        record_deployment_file(&state, id, &path, &key).await?;
+        return Ok(StatusCode::CREATED.into_response());
+    }
+    let url = state.blobs.presign_put(&key, 300).await.map_err(internal)?;
+    let fallback = format!(
+        "{}/sites/v1/deployments/{id}/files/{path}",
+        state.config.public_url.trim_end_matches('/')
+    );
+    Ok(Json(json!({ "url": url, "fallback": fallback })).into_response())
+}
+
+fn deployment_blob_key(pref: &str, id: Uuid, path: &str) -> Result<String, ApiError> {
+    object_key(pref, "_sites", &format!("{id}/{path}"))
+        .map_err(|_| ApiError::forbidden("invalid path"))
+}
+
+async fn require_building(state: &AppState, id: Uuid, project_id: Uuid) -> Result<(), ApiError> {
     let building: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM reactor.site_deployments WHERE id = $1 AND project_id = $2 AND status = 'building'",
     )
     .bind(id)
-    .bind(resolved.project_id)
+    .bind(project_id)
     .fetch_optional(&state.pool)
     .await
     .map_err(internal)?;
     if building.is_none() {
         return Err(ApiError::not_found());
     }
-    let key = object_key(&resolved.pref, "_sites", &format!("{id}/{path}"))
-        .map_err(|_| ApiError::forbidden("invalid path"))?;
-    let content_type = content_type_for(&path);
-    state
-        .blobs
-        .put(&key, body, content_type)
-        .await
-        .map_err(internal)?;
+    Ok(())
+}
+
+async fn record_deployment_file(
+    state: &AppState,
+    id: Uuid,
+    path: &str,
+    key: &str,
+) -> Result<(), ApiError> {
+    let content_type = content_type_for(path);
     sqlx::query(
         "INSERT INTO reactor.site_deployment_files (deployment_id, path, blob_key, content_type) VALUES ($1, $2, $3, $4) \
          ON CONFLICT (deployment_id, path) DO UPDATE SET blob_key = EXCLUDED.blob_key, content_type = EXCLUDED.content_type",
     )
     .bind(id)
-    .bind(&path)
-    .bind(&key)
+    .bind(path)
+    .bind(key)
     .bind(content_type)
     .execute(&state.pool)
     .await
     .map_err(internal)?;
-    Ok(StatusCode::CREATED)
+    Ok(())
 }
 
 #[derive(Deserialize, Default)]
@@ -2514,13 +2570,12 @@ impl Invoker for ServerInvoker {
         name: String,
         body: Vec<u8>,
     ) -> Result<Vec<u8>, String> {
-        let (pref, database_url): (String, Option<String>) = sqlx::query_as(
-            "SELECT ref, database_url FROM reactor.projects WHERE id = $1",
-        )
-        .bind(project_id)
-        .fetch_one(&self.state.pool)
-        .await
-        .map_err(|err| err.to_string())?;
+        let (pref, database_url): (String, Option<String>) =
+            sqlx::query_as("SELECT ref, database_url FROM reactor.projects WHERE id = $1")
+                .bind(project_id)
+                .fetch_one(&self.state.pool)
+                .await
+                .map_err(|err| err.to_string())?;
         let resolved = Resolved {
             project_id,
             pref: pref.clone(),

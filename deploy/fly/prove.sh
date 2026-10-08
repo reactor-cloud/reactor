@@ -96,6 +96,21 @@ cp -R examples/todos/functions examples/todos/site "$work/"
   done
   [[ "$site" == 1 ]]
 
+  big="$(mktemp -d)"
+  mkdir -p "$big/site"
+  dd if=/dev/zero bs=1048576 count=3 of="$big/site/big.bin" status=none
+  printf 'big-ok\n' >"$big/site/index.html"
+  (
+    cd "$big"
+    "$CLI" projects create fly-big --link
+    big_ref="$(python3 -c 'import pathlib,re; text=pathlib.Path("reactor.toml").read_text(); print(re.search(r"ref = \"([a-z0-9]+)\"", text).group(1))')"
+    printf '%s\n' "$big_ref" >"$STATE/big-ref"
+    "$CLI" deploy
+  )
+  big_ref="$(cat "$STATE/big-ref")"
+  big_len="$(curl -sf -H "Host: ${big_ref}.reactor-v2.fly.dev" http://127.0.0.1:19080/big.bin | wc -c | tr -d ' ')"
+  [[ "$big_len" == "3145728" ]]
+
   other="$(mktemp -d)"
   mkdir -p "$other/site"
   printf 'from-fly-b\n' >"$other/site/index.html"

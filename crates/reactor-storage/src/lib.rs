@@ -23,6 +23,7 @@ pub trait BlobStore: Send + Sync {
     async fn list_objects(&self, prefix: &str) -> anyhow::Result<Vec<ObjectMeta>>;
     async fn presign_put(&self, key: &str, expires_secs: u64) -> anyhow::Result<String>;
     async fn presign_get(&self, key: &str, expires_secs: u64) -> anyhow::Result<String>;
+    async fn head(&self, key: &str) -> anyhow::Result<Option<u64>>;
 }
 
 pub fn object_key(project_ref: &str, bucket: &str, key: &str) -> Result<String, &'static str> {
@@ -196,6 +197,14 @@ impl BlobStore for FsStore {
 
     async fn presign_get(&self, key: &str, expires_secs: u64) -> anyhow::Result<String> {
         self.signed_url("get", key, expires_secs)
+    }
+
+    async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        let path = self.path_for(key)?;
+        if !path.is_file() {
+            return Ok(None);
+        }
+        Ok(Some(tokio::fs::metadata(path).await?.len()))
     }
 }
 
@@ -454,6 +463,33 @@ impl BlobStore for S3Store {
             .await?;
         Ok(presigned.uri().to_string())
     }
+
+    async fn head(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        match self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+        {
+            Ok(out) => Ok(Some(out.content_length().unwrap_or(0).max(0) as u64)),
+            Err(err) => {
+                let missing = err
+                    .as_service_error()
+                    .map(|e| e.is_not_found())
+                    .unwrap_or(false)
+                    || err
+                        .raw_response()
+                        .is_some_and(|raw| raw.status().as_u16() == 404);
+                if missing {
+                    Ok(None)
+                } else {
+                    Err(err.into())
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -463,6 +499,20 @@ mod tests {
     #[test]
     fn empty_s3_settings_use_the_execution_role() {
         assert!(!uses_static_s3("", "", ""));
+    }
+
+    #[tokio::test]
+    async fn filesystem_head_reports_size() {
+        let root = std::env::temp_dir().join(format!("reactor-head-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = FsStore::new(&root, "http://127.0.0.1", "secret");
+        assert!(store.head("missing").await.unwrap().is_none());
+        store
+            .put("a.txt", Bytes::from_static(b"hello"), "text/plain")
+            .await
+            .unwrap();
+        assert_eq!(store.head("a.txt").await.unwrap(), Some(5));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
