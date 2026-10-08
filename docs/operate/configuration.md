@@ -63,9 +63,13 @@ dedicated = "http://127.0.0.1:3001"
 | `auth.jwt_private_pem_file` | — | Ed25519 private key. Otherwise keys are created under `jwt_dir` (`.data/keys`) |
 | `database.url` | empty | Shared Postgres. Required |
 | `storage.backend` | `fs` | `fs` uses `fs_root`. `s3` uses the bucket settings |
+| `storage.endpoint` | empty | Address the server uses for bucket reads and writes |
+| `storage.public_endpoint` | `storage.endpoint` | Host baked into presigned URLs. On Fly this is `https://t3.storage.dev` while `storage.endpoint` is `https://fly.storage.tigris.dev` |
 | `storage.sign_secret` | the operator token, or `dev-sign` | Signs filesystem presigned URLs |
 | `functions.runtime` | `bun` | `lambda` publishes user functions instead of spawning Bun |
 | `postgrest.url` | — | Where `/data/v1` proxies |
+
+Listen mode accepts a site file body of 10 MB on the deployment upload routes. That is the fallback when a presigned PUT fails, and it stays inside the Fly proxy replay buffer. A larger file has to use the presigned URL. Lambda leaves those routes at 2 MB.
 
 `REACTOR_EXTENSIONS` is a comma-separated list of optional products. Empty means none. `queue` turns on `/queue/v1` and the queue drain. Any other name refuses to start. See [Extensions](/product/extensions/).
 

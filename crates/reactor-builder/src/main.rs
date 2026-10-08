@@ -93,23 +93,14 @@ async fn main() -> anyhow::Result<()> {
             .to_string_lossy()
             .replace('\\', "/");
         let bytes = fs::read(file.path())?;
-        let res = client
-            .put(format!("{base}/sites/v1/deployments/{id}/files/{rel}"))
-            .bearer_auth(&cli.key)
-            .body(bytes)
-            .send()
-            .await?;
-        if !res.status().is_success() {
+        if let Err(err) = put_deployment_file(&client, base, &cli.key, id, &rel, bytes).await {
             let _ = client
                 .post(format!("{base}/sites/v1/deployments/{id}/fail"))
                 .bearer_auth(&cli.key)
                 .json(&json!({ "error": format!("upload {rel} failed") }))
                 .send()
                 .await;
-            anyhow::bail!(
-                "upload {rel} failed: {}",
-                res.text().await.unwrap_or_default()
-            );
+            return Err(err);
         }
     }
     let finished = client
@@ -125,6 +116,71 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     let _ = fs::remove_dir_all(&work);
+    Ok(())
+}
+
+async fn put_deployment_file(
+    client: &reqwest::Client,
+    base: &str,
+    key: &str,
+    id: &str,
+    rel: &str,
+    bytes: Vec<u8>,
+) -> anyhow::Result<()> {
+    let ticket = client
+        .post(format!("{base}/sites/v1/deployments/{id}/files/{rel}"))
+        .bearer_auth(key)
+        .send()
+        .await?;
+    if !ticket.status().is_success() {
+        anyhow::bail!(
+            "upload {rel} failed: {}",
+            ticket.text().await.unwrap_or_default()
+        );
+    }
+    let ticket: Value = ticket.json().await?;
+    let url = ticket
+        .get("url")
+        .and_then(|v| v.as_str())
+        .context("upload url missing")?;
+    let fallback = ticket
+        .get("fallback")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let presigned = client.put(url).body(bytes.clone()).send().await?;
+    if !presigned.status().is_success() {
+        if bytes.len() > reactor_sites::SITE_BODY_LIMIT || fallback.is_empty() || fallback == url {
+            anyhow::bail!(
+                "upload {rel} failed: {}",
+                presigned.text().await.unwrap_or_default()
+            );
+        }
+        let fallback_res = client
+            .put(fallback)
+            .bearer_auth(key)
+            .body(bytes)
+            .send()
+            .await?;
+        if !fallback_res.status().is_success() {
+            anyhow::bail!(
+                "upload {rel} failed: {}",
+                fallback_res.text().await.unwrap_or_default()
+            );
+        }
+    }
+    let confirmed = client
+        .post(format!(
+            "{base}/sites/v1/deployments/{id}/files/{rel}/confirm"
+        ))
+        .bearer_auth(key)
+        .send()
+        .await?;
+    if !confirmed.status().is_success() {
+        anyhow::bail!(
+            "upload {rel} failed: {}",
+            confirmed.text().await.unwrap_or_default()
+        );
+    }
     Ok(())
 }
 

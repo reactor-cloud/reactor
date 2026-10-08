@@ -1,3 +1,13 @@
+pub const SITE_BODY_LIMIT: usize = 10 * 1024 * 1024;
+
+pub fn site_upload_target(path: &str) -> Option<(String, bool)> {
+    let (raw, confirm) = match path.strip_suffix("/confirm") {
+        Some(rest) if !rest.is_empty() && !rest.ends_with('/') => (rest, true),
+        _ => (path, false),
+    };
+    Some((safe_site_path(raw)?, confirm))
+}
+
 pub fn content_type_for(path: &str) -> &'static str {
     match path.rsplit('.').next() {
         Some("html") => "text/html; charset=utf-8",
@@ -123,6 +133,16 @@ mod tests {
     fn path_and_txt() {
         assert_eq!(safe_site_path("/").as_deref(), Some("index.html"));
         assert!(safe_site_path("/../secret").is_none());
+        assert_eq!(
+            site_upload_target("index.html"),
+            Some(("index.html".into(), false))
+        );
+        assert_eq!(
+            site_upload_target("assets/app.js/confirm"),
+            Some(("assets/app.js".into(), true))
+        );
+        assert!(site_upload_target("foo..bar").is_none());
+        assert!(site_upload_target("../secret").is_none());
         assert!(txt_matches(
             &["reactor-site-verification=abc".into()],
             "abc"

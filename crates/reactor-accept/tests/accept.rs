@@ -335,6 +335,15 @@ async fn gate_builder() {
 }
 
 #[tokio::test]
+async fn gate_site_upload() {
+    run_gate(async {
+        let http = live().await?;
+        site_upload_gate(&http).await
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn gate_dedicated() {
     run_gate(async {
         let http = live().await?;
@@ -1192,6 +1201,314 @@ async fn builder_gate(http: &Http) -> anyhow::Result<()> {
         .await?;
     assert!(!extra.contains("extra-file"), "{extra}");
     let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+async fn site_upload_gate(http: &Http) -> anyhow::Result<()> {
+    let a = create_project(http, 18000).await?;
+    let b = create_project(http, 18000).await?;
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/sites/v1/deployments",
+            Some(&a.service),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let started: Value = serde_json::from_str(&body)?;
+    let id = started["id"].as_str().unwrap();
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            &format!("/sites/v1/deployments/{id}/files/three.bin"),
+            Some(&a.anon),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 403, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&b.pref),
+            "POST",
+            &format!("/sites/v1/deployments/{id}/files/three.bin"),
+            Some(&b.service),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 404, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            &format!("/sites/v1/deployments/{id}/files/foo..bar"),
+            Some(&a.service),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 403, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            &format!("/sites/v1/deployments/{id}/files/missing.bin/confirm"),
+            Some(&a.service),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 404, "{body}");
+    let three = vec![b'A'; 3 * 1024 * 1024];
+    let eleven = vec![b'B'; 11 * 1024 * 1024];
+    let put_three = http
+        .client
+        .put(Http::url(
+            18000,
+            Some(&a.pref),
+            &format!("/sites/v1/deployments/{id}/files/three.bin"),
+        ))
+        .bearer_auth(&a.service)
+        .body(three.clone())
+        .send()
+        .await?;
+    assert_eq!(
+        put_three.status().as_u16(),
+        201,
+        "{}",
+        put_three.text().await.unwrap_or_default()
+    );
+    let put_eleven = http
+        .client
+        .put(Http::url(
+            18000,
+            Some(&a.pref),
+            &format!("/sites/v1/deployments/{id}/files/too-big.bin"),
+        ))
+        .bearer_auth(&a.service)
+        .body(eleven.clone())
+        .send()
+        .await?;
+    assert_eq!(put_eleven.status().as_u16(), 413);
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            &format!("/sites/v1/deployments/{id}/files/eleven.bin"),
+            Some(&a.service),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let ticket: Value = serde_json::from_str(&body)?;
+    let url = ticket["url"].as_str().unwrap();
+    assert!(url.contains("127.0.0.1:19000"), "ticket url was {url}");
+    assert!(
+        !url.contains("/sites/v1/"),
+        "ticket url pointed at the api: {url}"
+    );
+    let uploaded = http.client.put(url).body(eleven.clone()).send().await?;
+    assert!(
+        uploaded.status().is_success(),
+        "{}",
+        uploaded.text().await.unwrap_or_default()
+    );
+    for _ in 0..2 {
+        let (status, body) = http
+            .call(
+                18000,
+                Some(&a.pref),
+                "POST",
+                &format!("/sites/v1/deployments/{id}/files/eleven.bin/confirm"),
+                Some(&a.service),
+                None,
+            )
+            .await?;
+        assert_eq!(status, 201, "{body}");
+    }
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            &format!("/sites/v1/deployments/{id}/finish"),
+            Some(&a.service),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    assert_site_bytes(http, &a.pref, "/three.bin", &three).await?;
+    assert_site_bytes(http, &a.pref, "/eleven.bin", &eleven).await?;
+    let missing = http
+        .client
+        .get(Http::url(18000, Some(&a.pref), "/too-big.bin"))
+        .send()
+        .await?;
+    assert_eq!(missing.status().as_u16(), 404);
+
+    let kept = deploy_site_dir(http, &[("index.html", b"kept".to_vec())]).await?;
+    let failed = kept.dir.clone();
+    std::fs::write(failed.join("site/foo..bar"), b"nope")?;
+    let bin = env("REACTOR_CLI");
+    let again = Command::new(&bin)
+        .arg("deploy")
+        .current_dir(&failed)
+        .output()?;
+    assert!(!again.status.success(), "bad path deploy succeeded");
+    let page = http
+        .client
+        .get(Http::url(18000, Some(&kept.pref), "/"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert_eq!(page, "kept");
+    let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+    let (deploy_status, error): (String, String) = sqlx::query_as(
+        "SELECT d.status, d.error FROM reactor.site_deployments d \
+         JOIN reactor.projects p ON p.id = d.project_id \
+         WHERE p.ref = $1 ORDER BY d.created_at DESC LIMIT 1",
+    )
+    .bind(&kept.pref)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(deploy_status, "error", "{error}");
+    assert!(error.contains("upload"), "{error}");
+    let _ = std::fs::remove_dir_all(&kept.dir);
+
+    let project = create_project(http, 18000).await?;
+    let dir = std::env::temp_dir().join(format!("reactor-build-wide-{}", project.pref));
+    std::fs::create_dir_all(&dir)?;
+    let zip_path = dir.join("wide.zip");
+    std::fs::write(
+        &zip_path,
+        zip_files(&[
+            (
+                "reactor.toml",
+                "[build]\ncommand = \"python3 build.py\"\n\n[site]\ndir = \"site\"\n",
+            ),
+            (
+                "build.py",
+                "import pathlib\npathlib.Path('site').mkdir(exist_ok=True)\npathlib.Path('site/index.html').write_text('built-big')\npathlib.Path('site/wide.bin').write_bytes(b'W'*(3*1024*1024))\n",
+            ),
+        ]),
+    )?;
+    run_builder(&project, &zip_path)?;
+    let page = http
+        .client
+        .get(Http::url(18000, Some(&project.pref), "/"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert_eq!(page, "built-big");
+    let wide = http
+        .client
+        .get(Http::url(18000, Some(&project.pref), "/wide.bin"))
+        .send()
+        .await?
+        .bytes()
+        .await?;
+    assert_eq!(wide.len(), 3 * 1024 * 1024);
+    assert!(wide.iter().all(|byte| *byte == b'W'));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let cli = deploy_site_dir(http, &[
+        ("index.html", b"cli-big".to_vec()),
+        ("three.bin", vec![b'C'; 3 * 1024 * 1024]),
+        ("eleven.bin", vec![b'D'; 11 * 1024 * 1024]),
+    ])
+    .await?;
+    let page = http
+        .client
+        .get(Http::url(18000, Some(&cli.pref), "/"))
+        .send()
+        .await?
+        .text()
+        .await?;
+    assert_eq!(page, "cli-big");
+    assert_site_bytes(http, &cli.pref, "/three.bin", &vec![b'C'; 3 * 1024 * 1024]).await?;
+    assert_site_bytes(
+        http,
+        &cli.pref,
+        "/eleven.bin",
+        &vec![b'D'; 11 * 1024 * 1024],
+    )
+    .await?;
+    let _ = std::fs::remove_dir_all(&cli.dir);
+    Ok(())
+}
+
+struct DeployedSite {
+    pref: String,
+    dir: PathBuf,
+}
+
+async fn deploy_site_dir(
+    http: &Http,
+    files: &[(&str, Vec<u8>)],
+) -> anyhow::Result<DeployedSite> {
+    let project = create_project(http, 18000).await?;
+    let dir = std::env::temp_dir().join(format!("reactor-site-{}", project.pref));
+    std::fs::create_dir_all(dir.join("site"))?;
+    for (name, bytes) in files {
+        let path = dir.join("site").join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, bytes)?;
+    }
+    let bin = env("REACTOR_CLI");
+    let link = Command::new(&bin)
+        .args([
+            "link",
+            "--url",
+            "http://127.0.0.1:18000",
+            "--ref",
+            &project.pref,
+            "--service-key",
+            &project.service,
+        ])
+        .current_dir(&dir)
+        .status()?;
+    assert!(link.success());
+    let deploy = Command::new(&bin)
+        .arg("deploy")
+        .current_dir(&dir)
+        .output()?;
+    assert!(
+        deploy.status.success(),
+        "deploy {}\n{}",
+        String::from_utf8_lossy(&deploy.stdout),
+        String::from_utf8_lossy(&deploy.stderr)
+    );
+    Ok(DeployedSite {
+        pref: project.pref,
+        dir,
+    })
+}
+
+async fn assert_site_bytes(
+    http: &Http,
+    pref: &str,
+    path: &str,
+    expect: &[u8],
+) -> anyhow::Result<()> {
+    let got = http
+        .client
+        .get(Http::url(18000, Some(pref), path))
+        .send()
+        .await?
+        .bytes()
+        .await?;
+    assert_eq!(got.len(), expect.len(), "{path}");
+    assert!(got.as_ref() == expect, "{path} bytes differed");
     Ok(())
 }
 
@@ -4714,7 +5031,6 @@ async fn gate_oauth() {
     .await;
 }
 
-
 const BOOM_SOURCE: &str = r#"
 const raw = await Bun.stdin.text();
 let req = {};
@@ -4726,7 +5042,12 @@ if (req.file) {
 process.exit(1);
 "#;
 
-async fn deploy_source(http: &Http, project: &Keys, name: &str, source: &str) -> anyhow::Result<()> {
+async fn deploy_source(
+    http: &Http,
+    project: &Keys,
+    name: &str,
+    source: &str,
+) -> anyhow::Result<()> {
     let zip = reactor_functions::zip_single("index.ts", source)?;
     let res = http
         .client
@@ -4779,11 +5100,10 @@ async fn project_logs(pref: &str, kind: &str, name: &str) -> anyhow::Result<Vec<
 async fn task_gate(http: &Http) -> anyhow::Result<()> {
     let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
     let project = create_project(http, 18000).await?;
-    let project_id: Uuid =
-        sqlx::query_scalar("SELECT id FROM reactor.projects WHERE ref = $1")
-            .bind(&project.pref)
-            .fetch_one(&pool)
-            .await?;
+    let project_id: Uuid = sqlx::query_scalar("SELECT id FROM reactor.projects WHERE ref = $1")
+        .bind(&project.pref)
+        .fetch_one(&pool)
+        .await?;
     let user_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO reactor.users (id, project_id, email, password_hash) VALUES ($1, $2, $3, 'x')",
@@ -4975,7 +5295,9 @@ async fn queue_gate(http: &Http) -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(status, 201, "{body}");
-    let msg_id = serde_json::from_str::<Value>(&body)?["msg_id"].as_i64().unwrap();
+    let msg_id = serde_json::from_str::<Value>(&body)?["msg_id"]
+        .as_i64()
+        .unwrap();
     let (status, body) = http
         .call(
             18000,
@@ -4987,7 +5309,10 @@ async fn queue_gate(http: &Http) -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(status, 200, "{body}");
-    assert!(body.contains("\"n\":1") || body.contains("\"n\": 1"), "{body}");
+    assert!(
+        body.contains("\"n\":1") || body.contains("\"n\": 1"),
+        "{body}"
+    );
     let (status, body) = http
         .call(
             18000,
@@ -5127,11 +5452,16 @@ async fn queue_gate(http: &Http) -> anyhow::Result<()> {
     assert_eq!(body, "[]", "{body}");
     let delivered = project_logs(&a.pref, "queue", "jobs:echo").await?;
     assert!(
-        delivered.iter().any(|(status, message)| *status == 200 && message.is_empty()),
+        delivered
+            .iter()
+            .any(|(status, message)| *status == 200 && message.is_empty()),
         "{delivered:?}"
     );
     let echoed = project_logs(&a.pref, "function", "echo").await?;
-    assert!(echoed.iter().any(|(status, _)| *status == 200), "{echoed:?}");
+    assert!(
+        echoed.iter().any(|(status, _)| *status == 200),
+        "{echoed:?}"
+    );
 
     let (status, body) = http
         .call(
@@ -5190,10 +5520,17 @@ async fn queue_gate(http: &Http) -> anyhow::Result<()> {
     .await?;
     assert_eq!(archived, 1);
     let attempts = project_logs(&a.pref, "queue", "retries:boom").await?;
-    assert_eq!(attempts.iter().filter(|(status, _)| *status == 500).count(), 2, "{attempts:?}");
+    assert_eq!(
+        attempts.iter().filter(|(status, _)| *status == 500).count(),
+        2,
+        "{attempts:?}"
+    );
     let boomed = project_logs(&a.pref, "function", "boom").await?;
     assert_eq!(
-        boomed.iter().filter(|(status, message)| *status == 500 && !message.is_empty()).count(),
+        boomed
+            .iter()
+            .filter(|(status, message)| *status == 500 && !message.is_empty())
+            .count(),
         2,
         "{boomed:?}"
     );
@@ -5238,7 +5575,6 @@ async fn queue_gate(http: &Http) -> anyhow::Result<()> {
     assert!(body.contains("cli"), "{body}");
     Ok(())
 }
-
 
 #[tokio::test]
 async fn project_role_owns_its_schema_and_nothing_else() {
@@ -5320,19 +5656,20 @@ async fn project_role_gate() -> anyhow::Result<()> {
             .await?;
     assert!(!reactor_usage);
     let other_schema = format!("proj_{}", other.pref);
-    let other_usage: bool =
-        sqlx::query_scalar("SELECT has_schema_privilege($1, $2, 'USAGE')")
-            .bind(&role)
-            .bind(&other_schema)
-            .fetch_one(&pool)
-            .await?;
+    let other_usage: bool = sqlx::query_scalar("SELECT has_schema_privilege($1, $2, 'USAGE')")
+        .bind(&role)
+        .bind(&other_schema)
+        .fetch_one(&pool)
+        .await?;
     assert!(!other_usage);
     sqlx::query(&format!("ALTER SCHEMA \"{schema}\" OWNER TO CURRENT_USER"))
         .execute(&pool)
         .await?;
-    sqlx::query(&format!("ALTER TABLE \"{schema}\".notes OWNER TO CURRENT_USER"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(&format!(
+        "ALTER TABLE \"{schema}\".notes OWNER TO CURRENT_USER"
+    ))
+    .execute(&pool)
+    .await?;
     let (status, body) = http
         .call(
             18000,
@@ -5371,7 +5708,13 @@ async fn project_role_gate() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn console_migrate(http: &Http, token: &str, pref: &str, version: &str, sql: &str) -> anyhow::Result<(u16, String)> {
+async fn console_migrate(
+    http: &Http,
+    token: &str,
+    pref: &str,
+    version: &str,
+    sql: &str,
+) -> anyhow::Result<(u16, String)> {
     http.call(
         18000,
         None,
@@ -5416,7 +5759,10 @@ async fn superware_launch_gate() -> anyhow::Result<()> {
     let project = Keys {
         pref: created["ref"].as_str().context("ref")?.to_string(),
         anon: created["anon_key"].as_str().context("anon")?.to_string(),
-        service: created["service_key"].as_str().context("service")?.to_string(),
+        service: created["service_key"]
+            .as_str()
+            .context("service")?
+            .to_string(),
     };
     let (status, body) = console_migrate(
         &http,
@@ -5483,7 +5829,10 @@ async fn superware_launch_gate() -> anyhow::Result<()> {
     for (version, sql) in [
         ("0002_drop_scratch.sql", "DROP TABLE scratch;"),
         ("0003_drop_title.sql", "ALTER TABLE jobs DROP COLUMN title;"),
-        ("0004_grant_delete.sql", "GRANT DELETE ON sw_members TO service;"),
+        (
+            "0004_grant_delete.sql",
+            "GRANT DELETE ON sw_members TO service;",
+        ),
     ] {
         let (status, body) = console_migrate(&http, &key, &project.pref, version, sql).await?;
         assert_eq!(status, 200, "{version} {body}");
@@ -5498,7 +5847,10 @@ async fn superware_launch_gate() -> anyhow::Result<()> {
     .await?;
     assert_eq!(status, 400, "{body}");
     assert!(!body.contains("sql is not allowed"), "{body}");
-    assert!(body.to_ascii_lowercase().contains("permission denied"), "{body}");
+    assert!(
+        body.to_ascii_lowercase().contains("permission denied"),
+        "{body}"
+    );
     let leaked: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM reactor.schema_migrations m \
          JOIN reactor.projects p ON p.id = m.project_id \
@@ -5522,7 +5874,12 @@ async fn superware_launch_gate() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn post_sql(http: &Http, token: &str, pref: &str, body: Value) -> anyhow::Result<(u16, String)> {
+async fn post_sql(
+    http: &Http,
+    token: &str,
+    pref: &str,
+    body: Value,
+) -> anyhow::Result<(u16, String)> {
     http.call(
         18000,
         None,
@@ -5575,7 +5932,9 @@ async fn sql_run_gate() -> anyhow::Result<()> {
     let result = &parsed["results"][0];
     assert_eq!(result["columns"][0], "n");
     assert_eq!(result["truncated"], false);
-    assert!(result["rows"].as_array().is_some_and(|rows| !rows.is_empty()));
+    assert!(result["rows"]
+        .as_array()
+        .is_some_and(|rows| !rows.is_empty()));
     let (status, body) = post_sql(
         &http,
         &session,
@@ -5610,7 +5969,10 @@ async fn sql_run_gate() -> anyhow::Result<()> {
     )
     .await?;
     assert_eq!(status, 400, "{body}");
-    assert!(body.to_ascii_lowercase().contains("permission denied"), "{body}");
+    assert!(
+        body.to_ascii_lowercase().contains("permission denied"),
+        "{body}"
+    );
     let (status, body) = post_sql(
         &http,
         &session,
@@ -5619,15 +5981,12 @@ async fn sql_run_gate() -> anyhow::Result<()> {
     )
     .await?;
     assert_eq!(status, 400, "{body}");
-    assert!(body.to_ascii_lowercase().contains("permission denied"), "{body}");
+    assert!(
+        body.to_ascii_lowercase().contains("permission denied"),
+        "{body}"
+    );
     set_role(&pool, &project.pref, &email, "developer").await?;
-    let (status, _) = post_sql(
-        &http,
-        &session,
-        &project.pref,
-        json!({"sql": "SELECT 1"}),
-    )
-    .await?;
+    let (status, _) = post_sql(&http, &session, &project.pref, json!({"sql": "SELECT 1"})).await?;
     assert_eq!(status, 403);
     set_role(&pool, &project.pref, &email, "admin").await?;
     let (status, body) = post_sql(
@@ -5645,7 +6004,9 @@ async fn sql_run_gate() -> anyhow::Result<()> {
             "POST",
             "/console/v1/keys",
             Some(&session),
-            Some(json!({"name": "migrate-only", "scopes": ["projects.create", "projects.migrate"]})),
+            Some(
+                json!({"name": "migrate-only", "scopes": ["projects.create", "projects.migrate"]}),
+            ),
         )
         .await?;
     assert_eq!(status, 200, "{body}");
@@ -5692,7 +6053,8 @@ async fn sql_run_gate() -> anyhow::Result<()> {
     assert_eq!(status, 200, "{body}");
     let owned: Value = serde_json::from_str(&body)?;
     let owned_ref = owned["ref"].as_str().context("ref")?;
-    let (status, body) = post_sql(&http, &sql_key, owned_ref, json!({"sql": "SELECT 1 AS n"})).await?;
+    let (status, body) =
+        post_sql(&http, &sql_key, owned_ref, json!({"sql": "SELECT 1 AS n"})).await?;
     assert_eq!(status, 200, "{body}");
     Ok(())
 }
@@ -5781,7 +6143,10 @@ async fn revert_gate() -> anyhow::Result<()> {
             18000,
             None,
             "POST",
-            &format!("/console/v1/projects/{}/migrations/0004_widget.sql/revert", project.pref),
+            &format!(
+                "/console/v1/projects/{}/migrations/0004_widget.sql/revert",
+                project.pref
+            ),
             Some(&session),
             None,
         )
@@ -5810,7 +6175,10 @@ async fn revert_gate() -> anyhow::Result<()> {
             18000,
             None,
             "POST",
-            &format!("/console/v1/projects/{}/migrations/0004_widget.sql/revert", project.pref),
+            &format!(
+                "/console/v1/projects/{}/migrations/0004_widget.sql/revert",
+                project.pref
+            ),
             Some(&session),
             None,
         )
@@ -5833,7 +6201,10 @@ async fn revert_gate() -> anyhow::Result<()> {
             18000,
             None,
             "POST",
-            &format!("/console/v1/projects/{}/migrations/0006_touch.sql/revert", project.pref),
+            &format!(
+                "/console/v1/projects/{}/migrations/0006_touch.sql/revert",
+                project.pref
+            ),
             Some(&session),
             None,
         )
@@ -5902,12 +6273,11 @@ async fn reset_role_gate() -> anyhow::Result<()> {
             .fetch_one(&pool)
             .await?;
     assert_ne!(before, after);
-    let live_backends: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM pg_stat_activity WHERE usename = $1",
-    )
-    .bind(&role)
-    .fetch_one(&pool)
-    .await?;
+    let live_backends: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE usename = $1")
+            .bind(&role)
+            .fetch_one(&pool)
+            .await?;
     assert_eq!(live_backends, 0);
     let (status, body) = post_sql(
         &http,

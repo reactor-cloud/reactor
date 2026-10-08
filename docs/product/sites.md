@@ -21,9 +21,13 @@ For a site host, Reactor looks up the path in this order:
 `reactor deploy` looks for a `site/` directory.
 
 1. `POST /sites/v1/deployments` with the service key starts a deployment.
-2. Each file is `PUT /sites/v1/deployments/{id}/files/{path}`.
-3. `POST /sites/v1/deployments/{id}/finish` marks it ready and makes it the live set.
-4. A failed upload calls `POST /sites/v1/deployments/{id}/fail`. A deployment goes live only when every file succeeds. Until finish, the previous live set keeps serving. A path with `..` is 403 `{ "error": "invalid path" }`.
+2. `POST /sites/v1/deployments/{id}/files/{path}` returns `{ "url", "fallback" }`. `url` is a presigned PUT for that object. `fallback` is the listen-mode upload URL.
+3. `PUT` the file bytes to `url`. If that fails and the file is at most 10 MB, `PUT` the bytes to `fallback` instead. A larger file has no body fallback.
+4. `POST /sites/v1/deployments/{id}/files/{path}/confirm` records the file after the object exists. Confirming the same path again is the same row.
+5. `POST /sites/v1/deployments/{id}/finish` marks it ready and makes it the live set.
+6. A failed upload calls `POST /sites/v1/deployments/{id}/fail`. A deployment goes live only when every file succeeds. Until finish, the previous live set keeps serving. A path with `..` is 403 `{ "error": "invalid path" }`.
+
+`PUT /sites/v1/deployments/{id}/files/{path}` still accepts the bytes itself. That is `fallback`. Listen mode accepts 10 MB on that route. Lambda stays at 2 MB, so a client talking to the API Lambda uses the presigned URL, and `fallback` is `http.public_url` (the ALB on AWS).
 
 Files are objects in the blob store. The server sets a content type from the extension: html, css, js, json, svg, png, txt, or bytes.
 

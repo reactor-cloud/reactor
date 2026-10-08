@@ -15,3 +15,4 @@ zip = { workspace = true }
 toml = "0.8"
 walkdir = "2"
 rpassword = "7"
+reactor-sites = { path = "../reactor-sites" }

@@ -107,7 +107,9 @@ Service key, except the public site host itself.
 | Method | Path |
 | --- | --- |
 | `POST` | `/sites/v1/deployments` |
-| `PUT` | `/sites/v1/deployments/{id}/files/{path}` |
+| `POST` | `/sites/v1/deployments/{id}/files/{path}` returns `{ "url", "fallback" }` |
+| `PUT` | `/sites/v1/deployments/{id}/files/{path}` body, at most 10 MB in listen mode |
+| `POST` | `/sites/v1/deployments/{id}/files/{path}/confirm` |
 | `POST` | `/sites/v1/deployments/{id}/finish` |
 | `POST` | `/sites/v1/deployments/{id}/fail` |
 | `PUT` | `/sites/v1/files/{path}` |
