@@ -737,7 +737,302 @@ async fn storage_gate(http: &Http, a: &Keys, b: &Keys) -> anyhow::Result<()> {
     let got = http.client.get(v["url"].as_str().unwrap()).send().await?;
     let text = got.text().await?;
     assert_eq!(text, "hello-object");
+    for bucket in ["_functions", "_sites"] {
+        let (status, body) = http
+            .call(
+                18000,
+                Some(&a.pref),
+                "POST",
+                "/storage/v1/object/presign",
+                Some(&a.service),
+                Some(json!({"bucket": bucket, "key": "a.txt", "method": "GET"})),
+            )
+            .await?;
+        assert_eq!(status, 403, "{bucket} {body}");
+    }
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&b.pref),
+            "POST",
+            "/storage/v1/object/presign",
+            Some(&b.service),
+            Some(json!({"bucket": "files", "key": "a.txt", "method": "GET"})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let other: Value = serde_json::from_str(&body)?;
+    assert!(
+        !other["key"].as_str().unwrap().contains(&a.pref),
+        "{other}"
+    );
+    let owner = signup_email(http, a, &format!("owner-{}@example.com", &a.pref[..8])).await?;
+    let other_user = signup_email(http, a, &format!("other-{}@example.com", &a.pref[..8])).await?;
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/storage/v1/bucket",
+            Some(&a.service),
+            Some(json!({"name": "docs", "public": false})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/storage/v1/object/presign",
+            Some(&a.anon),
+            Some(json!({"bucket": "docs", "key": "a.txt", "method": "GET"})),
+        )
+        .await?;
+    assert_eq!(status, 403, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/storage/v1/object/presign",
+            Some(&other_user.access),
+            Some(json!({"bucket": "docs", "key": "a.txt", "method": "PUT"})),
+        )
+        .await?;
+    assert_eq!(status, 403, "{body}");
+    let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+    sqlx::raw_sql(&format!(
+        "CREATE POLICY storage_owner ON \"proj_{}\".storage_objects FOR ALL TO authenticated \
+         USING (owner::text = current_setting('request.jwt.claims', true)::json->>'sub') \
+         WITH CHECK (owner::text = current_setting('request.jwt.claims', true)::json->>'sub')",
+        a.pref
+    ))
+    .execute(&pool)
+    .await?;
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/storage/v1/object/presign",
+            Some(&owner.access),
+            Some(json!({"bucket": "docs", "key": "a.txt", "method": "PUT"})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let uploaded: Value = serde_json::from_str(&body)?;
+    let put = http
+        .client
+        .put(uploaded["url"].as_str().unwrap())
+        .body("owned")
+        .send()
+        .await?;
+    assert!(put.status().is_success(), "{}", put.text().await.unwrap_or_default());
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/storage/v1/object/presign",
+            Some(&owner.access),
+            Some(json!({"bucket": "docs", "key": "a.txt", "method": "GET"})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/storage/v1/object/presign",
+            Some(&other_user.access),
+            Some(json!({"bucket": "docs", "key": "a.txt", "method": "GET"})),
+        )
+        .await?;
+    assert_eq!(status, 403, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/storage/v1/bucket",
+            Some(&a.service),
+            Some(json!({"name": "pub", "public": true})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/storage/v1/object/presign",
+            Some(&a.service),
+            Some(json!({"bucket": "pub", "key": "a.txt", "method": "PUT"})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let uploaded: Value = serde_json::from_str(&body)?;
+    let put = http
+        .client
+        .put(uploaded["url"].as_str().unwrap())
+        .body("public-bytes")
+        .send()
+        .await?;
+    assert!(put.status().is_success(), "{}", put.text().await.unwrap_or_default());
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "POST",
+            "/storage/v1/object/presign",
+            Some(&a.anon),
+            Some(json!({"bucket": "pub", "key": "b.txt", "method": "PUT"})),
+        )
+        .await?;
+    assert_eq!(status, 403, "{body}");
+    let open = http
+        .client
+        .get(Http::url(18000, Some(&a.pref), "/storage/v1/object/public/pub/a.txt"))
+        .send()
+        .await?;
+    let status = open.status();
+    let cache = open
+        .headers()
+        .get("cache-control")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let text = open.text().await?;
+    assert_eq!(status, 200, "{text}");
+    assert!(cache.contains("max-age=86400"), "{cache}");
+    assert_eq!(text, "public-bytes");
+    assert!(!Http::url(18000, Some(&a.pref), "/storage/v1/object/public/pub/a.txt").contains("exp="));
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&a.pref),
+            "GET",
+            "/storage/v1/bucket/pub",
+            Some(&a.anon),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let listed: Value = serde_json::from_str(&body)?;
+    assert_eq!(listed["public"], true);
+    assert!(
+        !listed["public_url_base"].as_str().unwrap_or("").contains("exp="),
+        "{listed}"
+    );
+    let token = console_token(&pool, http, a).await?;
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            &format!("/console/v1/projects/{}/buckets", a.pref),
+            Some(&token),
+            Some(json!({"name": "cdn", "public": true})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "GET",
+            &format!("/console/v1/projects/{}/buckets", a.pref),
+            Some(&token),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("cdn"), "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            &format!("/console/v1/projects/{}/objects/upload", a.pref),
+            Some(&token),
+            Some(json!({"path": "cdn/hello.txt"})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let uploaded: Value = serde_json::from_str(&body)?;
+    let put = http
+        .client
+        .put(uploaded["url"].as_str().unwrap())
+        .body("from-console")
+        .send()
+        .await?;
+    assert!(put.status().is_success(), "{}", put.text().await.unwrap_or_default());
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            &format!("/console/v1/projects/{}/objects/url", a.pref),
+            Some(&token),
+            Some(json!({"key": format!("{}/cdn/hello.txt", a.pref)})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let opened: Value = serde_json::from_str(&body)?;
+    assert_eq!(opened["public"], true, "{opened}");
+    assert!(!opened["url"].as_str().unwrap().contains("exp="), "{opened}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "PATCH",
+            &format!("/console/v1/projects/{}/buckets/cdn", a.pref),
+            Some(&token),
+            Some(json!({"public": false})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "GET",
+            &format!("/console/v1/projects/{}/buckets", a.pref),
+            Some(&token),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let listed: Value = serde_json::from_str(&body)?;
+    let cdn = listed
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["id"] == "cdn"))
+        .context("cdn bucket missing after access change")?;
+    assert_eq!(cdn["public"], false, "{cdn}");
     Ok(())
+}
+
+async fn signup_email(http: &Http, project: &Keys, email: &str) -> anyhow::Result<Session> {
+    allow_password(http, project).await?;
+    let (status, body) = http
+        .call(
+            18000,
+            Some(&project.pref),
+            "POST",
+            "/auth/v1/signup",
+            None,
+            Some(json!({"email": email, "password": "password123"})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    let v: Value = serde_json::from_str(&body)?;
+    Ok(Session {
+        access: v["access_token"].as_str().unwrap().to_string(),
+        refresh: v["refresh_token"].as_str().unwrap().to_string(),
+        user_id: v["user"]["id"].as_str().unwrap().to_string(),
+    })
 }
 
 async fn function_gate(http: &Http, a: &Keys, user: &Session) -> anyhow::Result<()> {

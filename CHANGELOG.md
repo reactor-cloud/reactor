@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.26.10-beta9
+
+Package manifests use `1.26.10-beta9`. The JavaScript, Swift, and Kotlin clients move to `1.26.10-beta9`.
+
+- A bucket is a row in `storage_buckets`. Object rows record the owner. Both tables force row-level security and start with no allow policy. A private bucket presigns only when a policy allows the caller. Until a bucket row exists, presign stays the previous URL.
+- A public bucket is readable at `GET /storage/v1/object/public/{bucket}/{key}` with no token. `storage.cdn_public_base` is the host clients pin when a CDN sits in front. The blob store itself stays private.
+- Site file uploads go through a presigned URL. Listen mode falls back to a direct upload at 10 MB.
+
 ## v1.26.10-beta8
 
 Package manifests use `1.26.10-beta8`. The JavaScript, Swift, and Kotlin clients move to `1.26.10-beta8`.

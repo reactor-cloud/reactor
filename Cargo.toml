@@ -18,7 +18,7 @@ members = [
 [workspace.package]
 edition = "2021"
 license = "BUSL-1.1"
-version = "1.26.10-beta8"
+version = "1.26.10-beta9"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "signal", "fs", "io-util", "sync", "time"] }

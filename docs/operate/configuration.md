@@ -66,6 +66,7 @@ dedicated = "http://127.0.0.1:3001"
 | `storage.endpoint` | empty | Address the server uses for bucket reads and writes |
 | `storage.public_endpoint` | `storage.endpoint` | Host baked into presigned URLs. On Fly this is `https://t3.storage.dev` while `storage.endpoint` is `https://fly.storage.tigris.dev` |
 | `storage.sign_secret` | the operator token, or `dev-sign` | Signs filesystem presigned URLs |
+| `storage.cdn_public_base` | empty | Host used in public object URLs. Empty means `{ref}.{base_domain}` |
 | `functions.runtime` | `bun` | `lambda` publishes user functions instead of spawning Bun |
 | `postgrest.url` | — | Where `/data/v1` proxies |
 

@@ -1,4 +1,5 @@
 mod agent;
+mod buckets;
 mod config;
 mod console;
 mod db;
@@ -33,7 +34,10 @@ use reactor_sites::{
     content_type_for, expected_txt, safe_site_path, site_upload_target, txt_from_doh, txt_matches,
     verification_name, SITE_BODY_LIMIT,
 };
-use reactor_storage::{object_key, verify_signature, BlobStore, FsStore, S3Store};
+use reactor_storage::{
+    clamp_expires, object_key, reserved_bucket, verify_signature, BlobStore,
+    FsStore, S3Store,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sites_proc::{safe_site_command, SiteSupervisor};
@@ -61,6 +65,7 @@ pub struct AppState {
     pub extension_sql: Arc<Vec<reactor_core::ExtensionSql>>,
     pub extensions: Arc<Vec<reactor_core::ExtensionInfo>>,
     pub project_pools: sql::ProjectPools,
+    pub bucket_flags: Arc<buckets::BucketFlags>,
 }
 
 pub type AppCtx = Ctx<AppState>;
@@ -287,6 +292,7 @@ pub async fn build_app(config: Config) -> anyhow::Result<Router> {
         extension_sql,
         extensions: extension_info,
         project_pools: sql::ProjectPools::default(),
+        bucket_flags: Arc::new(buckets::BucketFlags::default()),
     };
     let cron_state = state.clone();
     kernel.hook(reactor_core::Hook {
@@ -400,6 +406,9 @@ pub fn router(ctx: AppCtx, extra: Router<AppCtx>) -> Router {
     if all || handler == "storage" {
         app = app
             .route("/storage/v1/object/presign", post(presign))
+            .route("/storage/v1/object/public/{*path}", get(public_object))
+            .route("/storage/v1/bucket", post(create_bucket))
+            .route("/storage/v1/bucket/{name}", get(read_bucket))
             .route(
                 "/storage/v1/signed",
                 get(signed_get)
@@ -1230,6 +1239,8 @@ struct PresignBody {
     key: String,
     #[serde(default = "default_put")]
     method: String,
+    #[serde(default)]
+    expires_in: u64,
 }
 
 fn default_put() -> String {
@@ -1242,23 +1253,171 @@ struct PresignOut {
     key: String,
 }
 
+fn storage_public_host(config: &Config, pref: &str) -> String {
+    if config.storage_cdn_public_base.is_empty() {
+        console::site_public_url(pref, &config.base_domain, &config.public_url)
+    } else {
+        config.storage_cdn_public_base.clone()
+    }
+}
+
 async fn presign(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<PresignBody>,
 ) -> Result<Json<PresignOut>, ApiError> {
     let resolved = resolve_project(&state, &headers, true).await?;
+    if reserved_bucket(&body.bucket) {
+        return Err(ApiError::forbidden("invalid object key"));
+    }
     let key = object_key(&resolved.pref, &body.bucket, &body.key)
         .map_err(|_| ApiError::forbidden("invalid object key"))?;
     if !key.starts_with(&format!("{}/", resolved.pref)) {
         return Err(ApiError::forbidden("invalid object key"));
     }
-    let url = if body.method.eq_ignore_ascii_case("GET") {
-        state.blobs.presign_get(&key, 300).await.map_err(internal)?
+    let identity = resolved
+        .identity
+        .as_ref()
+        .ok_or_else(|| ApiError::unauthorized("token required"))?;
+    let pool = pool_for(&state, resolved.database_url.as_deref())
+        .await
+        .map_err(internal)?;
+    let write = !body.method.eq_ignore_ascii_case("GET");
+    let allowed = buckets::authorize(
+        &pool,
+        &resolved.pref,
+        identity,
+        &body.bucket,
+        &body.key,
+        write,
+    )
+    .await?;
+    if !allowed {
+        return Err(ApiError::forbidden("storage policy denied"));
+    }
+    let expires = clamp_expires(&body.method, body.expires_in);
+    let url = if write {
+        state
+            .blobs
+            .presign_put(&key, expires)
+            .await
+            .map_err(internal)?
     } else {
-        state.blobs.presign_put(&key, 300).await.map_err(internal)?
+        state
+            .blobs
+            .presign_get(&key, expires)
+            .await
+            .map_err(internal)?
     };
     Ok(Json(PresignOut { url, key }))
+}
+
+#[derive(Deserialize)]
+struct CreateBucketBody {
+    name: String,
+    #[serde(default)]
+    public: bool,
+}
+
+async fn create_bucket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CreateBucketBody>,
+) -> Result<Json<Value>, ApiError> {
+    let resolved = resolve_project(&state, &headers, true).await?;
+    require_service(&resolved)?;
+    let pool = pool_for(&state, resolved.database_url.as_deref())
+        .await
+        .map_err(internal)?;
+    buckets::create_bucket(&pool, &resolved.pref, &body.name, body.public).await?;
+    state
+        .bucket_flags
+        .put(buckets::cache_key(&resolved.pref, &body.name), body.public);
+    Ok(Json(json!({ "name": body.name, "public": body.public })))
+}
+
+async fn read_bucket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let resolved = resolve_project(&state, &headers, true).await?;
+    let pool = pool_for(&state, resolved.database_url.as_deref())
+        .await
+        .map_err(internal)?;
+    let public = buckets::bucket_is_public(&pool, &resolved.pref, &name)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let public_url_base = if public {
+        Some(buckets::public_base(
+            &state.config.storage_cdn_public_base,
+            &storage_public_host(&state.config, &resolved.pref),
+            &name,
+        ))
+    } else {
+        None
+    };
+    Ok(Json(json!({
+        "name": name,
+        "public": public,
+        "public_url_base": public_url_base,
+    })))
+}
+
+async fn public_object(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(path): Path<String>,
+) -> Result<Response, ApiError> {
+    let host = host_of(&headers);
+    let pref = project_ref_from_host(&host, &state.config.base_domain)
+        .map(|pref| pref.as_str().to_string())
+        .ok_or_else(ApiError::not_found)?;
+    let (bucket, key) = buckets::split_public_path(&path)?;
+    let cached = state
+        .bucket_flags
+        .get(&buckets::cache_key(&pref, &bucket));
+    let public = if let Some(flag) = cached {
+        flag
+    } else {
+        let row: Option<(Uuid, Option<String>)> =
+            sqlx::query_as("SELECT id, database_url FROM reactor.projects WHERE ref = $1")
+                .bind(&pref)
+                .fetch_optional(&state.pool)
+                .await
+                .map_err(internal)?;
+        let Some((_, database_url)) = row else {
+            return Err(ApiError::not_found());
+        };
+        let pool = pool_for(&state, database_url.as_deref())
+            .await
+            .map_err(internal)?;
+        let flag = buckets::bucket_is_public(&pool, &pref, &bucket)
+            .await?
+            .unwrap_or(false);
+        state
+            .bucket_flags
+            .put(buckets::cache_key(&pref, &bucket), flag);
+        flag
+    };
+    if !public {
+        return Err(ApiError::not_found());
+    }
+    let object = object_key(&pref, &bucket, &key).map_err(|_| ApiError::not_found())?;
+    let Some((bytes, content_type)) = state.blobs.get(&object).await.map_err(internal)? else {
+        return Err(ApiError::not_found());
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (
+                header::CACHE_CONTROL,
+                "public, max-age=86400".to_string(),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]

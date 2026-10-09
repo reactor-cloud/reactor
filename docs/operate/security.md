@@ -23,7 +23,7 @@ Zip entries that contain `..` or start with `/` are rejected.
 
 ## Storage
 
-Presign checks the project prefix before it issues a URL. The signed URL expires in 300 seconds. Filesystem URLs are HMAC'd with `storage.sign_secret`.
+Presign checks the project prefix before it issues a URL. `_functions` and `_sites` are refused. A bucket with no row still expires in 300 seconds, or the requested `expires_in` up to the cap. A bucket row is checked with the caller's role and row-level security before a URL is issued. Filesystem URLs are HMAC'd with `storage.sign_secret`. A public bucket's read URL has no signature.
 
 ## Operator routes
 

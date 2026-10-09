@@ -18,6 +18,6 @@ body:
     id: version
     attributes:
       label: Version
-      placeholder: v1.26.10-beta8
+      placeholder: v1.26.10-beta9
     validations:
       required: true

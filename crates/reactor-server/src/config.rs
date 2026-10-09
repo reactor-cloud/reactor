@@ -25,6 +25,7 @@ pub struct Config {
     pub storage_region: String,
     pub storage_fs_root: String,
     pub storage_sign_secret: String,
+    pub storage_cdn_public_base: String,
     pub functions_runtime: String,
     pub functions_workdir: String,
     pub functions_bun: String,
@@ -108,6 +109,8 @@ struct Section {
     fs_root: Option<String>,
     #[serde(default)]
     sign_secret: Option<String>,
+    #[serde(default)]
+    cdn_public_base: Option<String>,
     #[serde(default)]
     runtime: Option<String>,
     #[serde(default)]
@@ -239,6 +242,11 @@ impl Config {
                 ".data/blobs",
             ),
             storage_sign_secret: sign,
+            storage_cdn_public_base: pick(
+                "REACTOR_STORAGE__CDN_PUBLIC_BASE",
+                file.storage.cdn_public_base.clone(),
+                "",
+            ),
             functions_runtime: pick(
                 "REACTOR_FUNCTIONS__RUNTIME",
                 file.functions.runtime.clone(),

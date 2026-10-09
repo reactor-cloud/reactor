@@ -26,6 +26,30 @@ pub trait BlobStore: Send + Sync {
     async fn head(&self, key: &str) -> anyhow::Result<Option<u64>>;
 }
 
+pub fn reserved_bucket(bucket: &str) -> bool {
+    bucket == "_functions" || bucket == "_sites"
+}
+
+pub fn clamp_expires(op: &str, requested: u64) -> u64 {
+    let cap = if op.eq_ignore_ascii_case("put") {
+        300
+    } else {
+        3600
+    };
+    if requested == 0 {
+        300
+    } else {
+        requested.min(cap)
+    }
+}
+
+pub fn public_object_url(base: &str, bucket: &str, key: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let bucket = urlencoding(bucket);
+    let key = key.split('/').map(urlencoding).collect::<Vec<_>>().join("/");
+    format!("{base}/storage/v1/object/public/{bucket}/{key}")
+}
+
 pub fn object_key(project_ref: &str, bucket: &str, key: &str) -> Result<String, &'static str> {
     if bucket.is_empty()
         || key.is_empty()
@@ -495,6 +519,28 @@ impl BlobStore for S3Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_url_has_no_expiry() {
+        let url = public_object_url("https://files.example.com/", "photos", "a b/c.txt");
+        assert_eq!(
+            url,
+            "https://files.example.com/storage/v1/object/public/photos/a+b/c.txt"
+        );
+        assert!(!url.contains("exp="));
+        assert!(!url.contains("sig="));
+    }
+
+    #[test]
+    fn expires_cap_depends_on_the_method() {
+        assert_eq!(clamp_expires("GET", 0), 300);
+        assert_eq!(clamp_expires("GET", 60), 60);
+        assert_eq!(clamp_expires("GET", 99_999), 3600);
+        assert_eq!(clamp_expires("PUT", 99_999), 300);
+        assert!(reserved_bucket("_functions"));
+        assert!(reserved_bucket("_sites"));
+        assert!(!reserved_bucket("files"));
+    }
 
     #[test]
     fn empty_s3_settings_use_the_execution_role() {

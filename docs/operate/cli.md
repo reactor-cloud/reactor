@@ -18,7 +18,7 @@ brew tap reactor-cloud/reactor
 brew install reactor
 ```
 
-`v1.26.10-beta8` builds from source and needs Rust, which Homebrew installs as a build dependency. The formula uses tag `v1.26.10-beta8` of [reactor-cloud/reactor](https://github.com/reactor-cloud/reactor).
+`v1.26.10-beta9` builds from source and needs Rust, which Homebrew installs as a build dependency. The formula uses tag `v1.26.10-beta9` of [reactor-cloud/reactor](https://github.com/reactor-cloud/reactor).
 
 From a clone of the server repository, at the repository root:
 
@@ -111,6 +111,9 @@ reactor sites env
 reactor sites env set SITE_BANNER "hello" --visible
 reactor sites env unset SITE_BANNER
 reactor storage
+reactor storage buckets
+reactor storage buckets create photos --public
+reactor storage url photos notes/hello.txt
 reactor queue list
 reactor queue create jobs
 reactor queue send jobs '{"hello":"world"}'
