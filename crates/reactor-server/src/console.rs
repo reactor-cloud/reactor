@@ -3,7 +3,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use reactor_auth::{hash_password, random_token, token_hash, verify_password};
 use reactor_core::OpenedProject;
@@ -95,6 +95,14 @@ pub fn mount(app: Router<crate::AppCtx>) -> Router<crate::AppCtx> {
         .route(
             "/console/v1/projects/{pref}/objects/upload",
             post(upload_url),
+        )
+        .route(
+            "/console/v1/projects/{pref}/buckets",
+            get(list_buckets).post(create_bucket),
+        )
+        .route(
+            "/console/v1/projects/{pref}/buckets/{name}",
+            patch(update_bucket),
         )
         .route("/console/v1/projects/{pref}/functions", get(functions))
         .route(
@@ -2170,12 +2178,28 @@ async fn object_url(
     if !user_object(&project.pref, &body.key) {
         return Err(ApiError::forbidden("object is outside this project"));
     }
+    if let Some((bucket, _)) = crate::buckets::bucket_and_name(&project.pref, &body.key) {
+        let pool = data_pool(&state, project.id).await?;
+        if crate::buckets::bucket_is_public(&pool, &project.pref, &bucket)
+            .await?
+            == Some(true)
+        {
+            let url = reactor_storage::public_object_url(
+                &crate::storage_public_host(&state.config, &project.pref),
+                &bucket,
+                body.key
+                    .strip_prefix(&format!("{}/{bucket}/", project.pref))
+                    .unwrap_or(""),
+            );
+            return Ok(Json(json!({ "url": url, "public": true })));
+        }
+    }
     let url = state
         .blobs
         .presign_get(&body.key, 300)
         .await
         .map_err(internal)?;
-    Ok(Json(json!({ "url": url })))
+    Ok(Json(json!({ "url": url, "public": false })))
 }
 
 #[derive(Deserialize)]
@@ -2220,7 +2244,87 @@ async fn delete_object(
         return Err(ApiError::forbidden("object is outside this project"));
     }
     state.blobs.delete_key(&body.key).await.map_err(internal)?;
+    if let Some((bucket, name)) = crate::buckets::bucket_and_name(&project.pref, &body.key) {
+        let pool = data_pool(&state, project.id).await?;
+        crate::buckets::delete_object_row(&pool, &project.pref, &bucket, &name).await;
+    }
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct BucketBody {
+    name: String,
+    #[serde(default)]
+    public: bool,
+}
+
+async fn list_buckets(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(pref): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let operator = require_operator(&state, &headers).await?;
+    let project = require_member(&state, &operator, &pref, "developer").await?;
+    let pool = data_pool(&state, project.id).await?;
+    let host = crate::storage_public_host(&state.config, &project.pref);
+    let rows = crate::buckets::list_buckets(&pool, &project.pref).await?;
+    let buckets = rows
+        .into_iter()
+        .map(|(id, public)| {
+            json!({
+                "id": id,
+                "public": public,
+                "public_url_base": if public {
+                    Some(crate::buckets::public_base(
+                        &state.config.storage_cdn_public_base,
+                        &host,
+                        &id,
+                    ))
+                } else {
+                    None
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!(buckets)))
+}
+
+async fn create_bucket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(pref): Path<String>,
+    Json(body): Json<BucketBody>,
+) -> Result<Json<Value>, ApiError> {
+    let operator = require_operator(&state, &headers).await?;
+    let project = require_member(&state, &operator, &pref, "admin").await?;
+    let pool = data_pool(&state, project.id).await?;
+    crate::buckets::create_bucket(&pool, &project.pref, &body.name, body.public).await?;
+    state.bucket_flags.put(
+        crate::buckets::cache_key(&project.pref, &body.name),
+        body.public,
+    );
+    Ok(Json(json!({ "name": body.name, "public": body.public })))
+}
+
+#[derive(Deserialize)]
+struct BucketAccess {
+    public: bool,
+}
+
+async fn update_bucket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((pref, name)): Path<(String, String)>,
+    Json(body): Json<BucketAccess>,
+) -> Result<Json<Value>, ApiError> {
+    let operator = require_operator(&state, &headers).await?;
+    let project = require_member(&state, &operator, &pref, "admin").await?;
+    let pool = data_pool(&state, project.id).await?;
+    crate::buckets::set_bucket_public(&pool, &project.pref, &name, body.public).await?;
+    state
+        .bucket_flags
+        .put(crate::buckets::cache_key(&project.pref, &name), body.public);
+    Ok(Json(json!({ "name": name, "public": body.public })))
 }
 
 pub(crate) fn user_object(pref: &str, key: &str) -> bool {

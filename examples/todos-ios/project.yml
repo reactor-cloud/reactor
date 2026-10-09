@@ -38,4 +38,4 @@ targets:
 packages:
   Reactor:
     url: https://github.com/reactor-cloud/reactor-swift
-    from: 1.26.10-beta8
+    from: 1.26.10-beta9

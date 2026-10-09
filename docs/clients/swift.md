@@ -5,10 +5,10 @@ description: ReactorClient for iOS 17 and macOS 14. Auth, queries, storage, and 
 
 The Swift client is for iOS and macOS apps. It covers the same four surfaces as the JavaScript client: auth, a query builder for Postgres, file storage, and functions. The query builder is smaller than PostgREST. Use HTTP when you need embeds, `or`, or a range this builder does not express.
 
-Add the package from GitHub. The release is the git tag `v1.26.10-beta8`. There is no second registry. Pin that tag. The product name is `Reactor`. It builds for iOS 17 and macOS 14.
+Add the package from GitHub. The release is the git tag `v1.26.10-beta9`. There is no second registry. Pin that tag. The product name is `Reactor`. It builds for iOS 17 and macOS 14.
 
 ```swift
-.package(url: "https://github.com/reactor-cloud/reactor-swift", exact: "1.26.10-beta8")
+.package(url: "https://github.com/reactor-cloud/reactor-swift", exact: "1.26.10-beta9")
 ```
 
 ```swift
@@ -72,6 +72,8 @@ let created = try await reactor.from("todos")
 ```swift
 try await reactor.storage.from("files").upload(path: path, data: data, contentType: "text/plain")
 let data = try await reactor.storage.from("files").download(path: path)
+try await reactor.storage.createBucket("photos", isPublic: true)
+let url = try await reactor.storage.from("photos").getPublicUrl(path: path)
 
 let result = try await reactor.functions.invoke("ping", body: .object(["hello": .string("world")]))
 ```

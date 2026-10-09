@@ -86,7 +86,10 @@ Creating a project with the operator token returns the keys once:
 | Method | Path | Who |
 | --- | --- | --- |
 | any | `/data/v1/...` | anon, user, or service. Proxied to PostgREST |
-| `POST` | `/storage/v1/object/presign` | a project token. Body `{ bucket, key, method }` |
+| `POST` | `/storage/v1/object/presign` | a project token. Body `{ bucket, key, method, expires_in }` |
+| `GET` | `/storage/v1/object/public/{bucket}/{key}` | no token, and only when the bucket is public |
+| `POST` | `/storage/v1/bucket` | a service key. Body `{ name, public }` |
+| `GET` | `/storage/v1/bucket/{name}` | a project token. Returns `public_url_base` when the bucket is public |
 | `GET` or `PUT` | `/storage/v1/signed` | the signature on the query string |
 | `POST` | `/fn/v1/{name}` | a project token. Body is stdin. Names starting with `_` are not public |
 | `POST` | `/fn/v1/{name}/enqueue` | service key. `{ body, delay_secs, max_attempts }` → 201 `{ id }` |

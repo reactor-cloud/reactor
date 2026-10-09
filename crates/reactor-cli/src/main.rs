@@ -83,7 +83,10 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<SitesCmd>,
     },
-    Storage,
+    Storage {
+        #[command(subcommand)]
+        cmd: Option<StorageCmd>,
+    },
     Db {
         #[command(subcommand)]
         cmd: DbCmd,
@@ -103,6 +106,27 @@ enum Cmd {
         /// Confirm warnings such as DROP or a missing row-level security policy.
         #[arg(long)]
         confirm: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum StorageCmd {
+    Buckets {
+        #[command(subcommand)]
+        cmd: Option<BucketsCmd>,
+    },
+    Url {
+        bucket: String,
+        key: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum BucketsCmd {
+    Create {
+        name: String,
+        #[arg(long)]
+        public: bool,
     },
 }
 
@@ -353,7 +377,16 @@ async fn main() -> anyhow::Result<()> {
                 Some(EnvCmd::Unset { key }) => unset_site_env(context, &key).await,
             },
         },
-        Cmd::Storage => storage(context).await,
+        Cmd::Storage { cmd } => match cmd {
+            None => storage(context).await,
+            Some(StorageCmd::Buckets { cmd }) => match cmd {
+                None => storage_buckets(context).await,
+                Some(BucketsCmd::Create { name, public }) => {
+                    storage_bucket_create(context, &name, public).await
+                }
+            },
+            Some(StorageCmd::Url { bucket, key }) => storage_url(context, &bucket, &key).await,
+        },
         Cmd::Db { cmd } => match cmd {
             DbCmd::Migrate { all, dry_run } => migrate(context, all, dry_run).await,
             DbCmd::Tables => tables(context).await,
@@ -1354,6 +1387,59 @@ async fn sites(context: Option<&str>) -> anyhow::Result<()> {
             println!("{path}");
         }
     }
+    Ok(())
+}
+
+async fn storage_buckets(context: Option<&str>) -> anyhow::Result<()> {
+    let pref = pref()?;
+    let body = console(
+        context,
+        Scope::Project,
+        "GET",
+        &format!("/console/v1/projects/{pref}/buckets"),
+        None,
+    )
+    .await?;
+    for bucket in rows_of(&body) {
+        let public = bucket
+            .get("public")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let flag = if public { "public" } else { "private" };
+        println!("{}\t{flag}", field(bucket, "id"));
+    }
+    Ok(())
+}
+
+async fn storage_bucket_create(
+    context: Option<&str>,
+    name: &str,
+    public: bool,
+) -> anyhow::Result<()> {
+    let pref = pref()?;
+    console(
+        context,
+        Scope::Project,
+        "POST",
+        &format!("/console/v1/projects/{pref}/buckets"),
+        Some(json!({ "name": name, "public": public })),
+    )
+    .await?;
+    println!("{name}");
+    Ok(())
+}
+
+async fn storage_url(context: Option<&str>, bucket: &str, key: &str) -> anyhow::Result<()> {
+    let pref = pref()?;
+    let body = console(
+        context,
+        Scope::Project,
+        "POST",
+        &format!("/console/v1/projects/{pref}/objects/url"),
+        Some(json!({ "key": format!("{pref}/{bucket}/{key}") })),
+    )
+    .await?;
+    println!("{}", field(&body, "url"));
     Ok(())
 }
 

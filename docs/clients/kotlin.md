@@ -5,11 +5,11 @@ description: ReactorClient for Android and the JVM. Auth, queries, storage, and 
 
 The Kotlin client is for Android and other JVM apps. It covers auth, a small query builder, file storage, and functions. The query builder is enough for the first screens of an app. Use HTTP for the rest of PostgREST.
 
-The coordinates are `sl.atomicollabs.reactor:reactor-client:1.26.10-beta8`. The git tag is `v1.26.10-beta8` on [reactor-cloud/reactor-kotlin](https://github.com/reactor-cloud/reactor-kotlin). Publishing to Maven Central still needs that portal’s token and a GPG key. Until those are in place, build the module from the repository.
+The coordinates are `sl.atomicollabs.reactor:reactor-client:1.26.10-beta9`. The git tag is `v1.26.10-beta9` on [reactor-cloud/reactor-kotlin](https://github.com/reactor-cloud/reactor-kotlin). Publishing to Maven Central still needs that portal’s token and a GPG key. Until those are in place, build the module from the repository.
 
 ```kotlin
 dependencies {
-    implementation("sl.atomicollabs.reactor:reactor-client:1.26.10-beta8")
+    implementation("sl.atomicollabs.reactor:reactor-client:1.26.10-beta9")
 }
 ```
 
@@ -55,6 +55,8 @@ val inserted = reactor.from("todos")
 
 reactor.storage.from("files").upload(path, bytes)
 val downloaded = reactor.storage.from("files").download(path)
+reactor.storage.createBucket("photos", public = true)
+val url = reactor.storage.from("photos").getPublicUrl(path)
 
 val result = reactor.functions.invoke("ping")
 ```

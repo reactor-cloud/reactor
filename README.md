@@ -6,7 +6,7 @@ Replace Supabase + Vercel with a self hostable binary and an integrated CLI to i
 
 [reactor.cloud](https://www.reactor.cloud)
 
-**v1.26.10-beta8** (package version `1.26.10-beta8`). The API can still change before a stable tag.
+**v1.26.10-beta9** (package version `1.26.10-beta9`). The API can still change before a stable tag.
 
 Postgres and a blob store are the only dependencies. One stateless server serves every surface.
 
@@ -44,7 +44,7 @@ Clients:
 npm install @reactor-cloud/client@beta
 ```
 
-Swift package `https://github.com/reactor-cloud/reactor-swift` at `1.26.10-beta8`. Maven `sl.atomicollabs.reactor:reactor-client:1.26.10-beta8`. The CLI is `brew tap reactor-cloud/reactor && brew install reactor`, from tag `v1.26.10-beta8`.
+Swift package `https://github.com/reactor-cloud/reactor-swift` at `1.26.10-beta9`. Maven `sl.atomicollabs.reactor:reactor-client:1.26.10-beta9`. The CLI is `brew tap reactor-cloud/reactor && brew install reactor`, from tag `v1.26.10-beta9`.
 
 ## Not included
 

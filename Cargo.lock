@@ -3360,7 +3360,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-accept"
-version = "1.26.10-beta8"
+version = "1.26.10-beta9"
 dependencies = [
  "anyhow",
  "axum",
@@ -3382,7 +3382,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-auth"
-version = "1.26.10-beta8"
+version = "1.26.10-beta9"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3407,7 +3407,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-builder"
-version = "1.26.10-beta8"
+version = "1.26.10-beta9"
 dependencies = [
  "anyhow",
  "clap",
@@ -3423,7 +3423,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-cli"
-version = "1.26.10-beta8"
+version = "1.26.10-beta9"
 dependencies = [
  "anyhow",
  "clap",
@@ -3440,7 +3440,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-core"
-version = "1.26.10-beta8"
+version = "1.26.10-beta9"
 dependencies = [
  "async-trait",
  "axum",
@@ -3457,7 +3457,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-email"
-version = "1.26.10-beta8"
+version = "1.26.10-beta9"
 dependencies = [
  "anyhow",
  "lettre",
@@ -3465,7 +3465,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-ext-queue"
-version = "1.26.10-beta8"
+version = "1.26.10-beta9"
 dependencies = [
  "async-trait",
  "axum",
@@ -3479,7 +3479,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-functions"
-version = "1.26.10-beta8"
+version = "1.26.10-beta9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3497,7 +3497,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-identity"
-version = "1.26.10-beta8"
+version = "1.26.10-beta9"
 dependencies = [
  "serde",
  "serde_json",
@@ -3507,7 +3507,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-server"
-version = "1.26.10-beta8"
+version = "1.26.10-beta9"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3553,7 +3553,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-sites"
-version = "1.26.10-beta8"
+version = "1.26.10-beta9"
 dependencies = [
  "serde",
  "serde_json",
@@ -3561,7 +3561,7 @@ dependencies = [
 
 [[package]]
 name = "reactor-storage"
-version = "1.26.10-beta8"
+version = "1.26.10-beta9"
 dependencies = [
  "anyhow",
  "async-trait",

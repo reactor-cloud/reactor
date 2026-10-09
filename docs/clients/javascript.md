@@ -5,7 +5,7 @@ description: The @reactor-cloud/client package. Auth, PostgREST data, storage, a
 
 `@reactor-cloud/client` is the JavaScript client for web apps. It is modeled on the Supabase JavaScript client so code stays portable: `createClient`, `auth.signUp`, `auth.signInWithPassword`, `from(table).select()`, storage buckets, and `functions.invoke` mean the same kind of thing. Data queries are built with `@supabase/postgrest-js` and sent to Reactor’s `/data/v1`, which is PostgREST.
 
-The package is published. This beta is `1.26.10-beta8` on the `beta` dist-tag, not `latest`.
+The package is published. This beta is `1.26.10-beta9` on the `beta` dist-tag, not `latest`.
 
 ```sh
 npm install @reactor-cloud/client@beta
@@ -17,7 +17,7 @@ npm install @reactor-cloud/client@beta
 | --- | --- |
 | `reactor.auth` | `/auth/v1` — sign up, password, magic link, recovery, invite, session |
 | `reactor.from` / `reactor.rpc` | `/data/v1` — PostgREST |
-| `reactor.storage.from` | `/storage/v1` — presign, then upload or download the signed URL |
+| `reactor.storage.from` | `/storage/v1` — presign, then upload or download the signed URL. `createBucket` and `getPublicUrl` for a public bucket |
 | `reactor.functions.invoke` | `/fn/v1/{name}` |
 | `reactor.functions.enqueue` | `/fn/v1/{name}/enqueue` — service key. `task(id)` reads `/fn/v1/_admin/tasks/{id}` |
 | `reactor.queue` | `/queue/v1` — service key, and the queue extension must be on |
@@ -131,6 +131,8 @@ An insert with `.select()` returns the inserted row in `data`, usually as an arr
 ```ts
 await reactor.storage.from("files").upload(path, body, { contentType: "text/plain" })
 const bytes = await reactor.storage.from("files").download(path)
+await reactor.storage.createBucket("photos", { public: true })
+const url = await reactor.storage.from("photos").getPublicUrl(path)
 
 const result = await reactor.functions.invoke("ping", { body: { hello: "world" } })
 ```
