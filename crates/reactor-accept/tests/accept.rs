@@ -3587,12 +3587,67 @@ async fn cli_service_keys(http: &Http) -> anyhow::Result<()> {
     Ok(())
 }
 
+struct DedicatedUrls {
+    from: String,
+    to: String,
+}
+
+impl DedicatedUrls {
+    async fn host() -> anyhow::Result<Self> {
+        let from = env("REACTOR_ACCEPT_PATCH_DATABASE_URL");
+        let to = env("REACTOR_ACCEPT_DEDICATED_URL");
+        let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+        sqlx::query("UPDATE reactor.projects SET database_url = $1 WHERE database_url = $2")
+            .bind(&to)
+            .bind(&from)
+            .execute(&pool)
+            .await?;
+        Ok(Self { from, to })
+    }
+}
+
+impl Drop for DedicatedUrls {
+    fn drop(&mut self) {
+        let sql = format!(
+            "UPDATE reactor.projects SET database_url = '{}' WHERE database_url = '{}'",
+            self.from.replace('\'', "''"),
+            self.to.replace('\'', "''")
+        );
+        let _ = Command::new("docker")
+            .args([
+                "exec",
+                "reactor-v2-postgres-1",
+                "psql",
+                "-U",
+                "reactor",
+                "-d",
+                "reactor",
+                "-c",
+                &sql,
+            ])
+            .output();
+    }
+}
+
+fn use_shared_jwt() -> bool {
+    std::env::temp_dir()
+        .join("reactor-v2-accept-keys/private.pem")
+        .exists()
+}
+
 async fn in_process_health() -> anyhow::Result<()> {
     let sql = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../sql");
     std::env::set_var("REACTOR_SQL_DIR", &sql);
     std::env::set_var("REACTOR_DATABASE__URL", env("REACTOR_ACCEPT_DATABASE_URL"));
     std::env::remove_var("REACTOR_DATABASE__DEDICATED_URL");
-    std::env::remove_var("REACTOR_AUTH__JWT_PRIVATE_PEM_FILE");
+    if use_shared_jwt() {
+        std::env::set_var(
+            "REACTOR_AUTH__JWT_PRIVATE_PEM_FILE",
+            std::env::temp_dir().join("reactor-v2-accept-keys/private.pem"),
+        );
+    } else {
+        std::env::remove_var("REACTOR_AUTH__JWT_PRIVATE_PEM_FILE");
+    }
     std::env::set_var("REACTOR_AUTH__PROVIDER", "internal");
     std::env::set_var(
         "REACTOR_AUTH__OPERATOR_TOKEN",
@@ -3612,6 +3667,7 @@ async fn in_process_health() -> anyhow::Result<()> {
         std::env::temp_dir().join("reactor-v2-accept-fn"),
     );
     std::env::set_var("REACTOR_HANDLER", "");
+    let _dedicated = DedicatedUrls::host().await?;
     let app = reactor_server::router_from_env().await?;
     let req = reactor_server::from_apigw_v2(&json!({
         "version": "2.0",
@@ -3906,7 +3962,16 @@ async fn boot_agent(
     env.set("REACTOR_SQL_DIR", &sql.to_string_lossy());
     env.set("REACTOR_DATABASE__URL", &database);
     env.unset("REACTOR_DATABASE__DEDICATED_URL");
-    env.unset("REACTOR_AUTH__JWT_PRIVATE_PEM_FILE");
+    if use_shared_jwt() {
+        env.set(
+            "REACTOR_AUTH__JWT_PRIVATE_PEM_FILE",
+            &std::env::temp_dir()
+                .join("reactor-v2-accept-keys/private.pem")
+                .to_string_lossy(),
+        );
+    } else {
+        env.unset("REACTOR_AUTH__JWT_PRIVATE_PEM_FILE");
+    }
     env.set("REACTOR_AUTH__PROVIDER", "internal");
     env.set("REACTOR_AUTH__OPERATOR_TOKEN", &operator);
     env.set("REACTOR_STORAGE__BACKEND", "fs");
@@ -3928,6 +3993,7 @@ async fn boot_agent(
     env.set("REACTOR_AGENT__BASE_URL", base_url);
     env.set("REACTOR_AGENT__API_KEY", api_key);
     env.set("REACTOR_AGENT__TURN_DEADLINE_SECONDS", "180");
+    let _dedicated = DedicatedUrls::host().await?;
     let app = reactor_server::router_from_env().await?;
     Ok((app, env))
 }
@@ -6620,4 +6686,883 @@ async fn reset_role_gate() -> anyhow::Result<()> {
         .await?;
     assert_eq!(status, 403, "{body}");
     Ok(())
+}
+
+const MCP_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+const MCP_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+fn no_redirect() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(40))
+        .build()
+        .unwrap()
+}
+
+fn hidden_value(html: &str, name: &str) -> anyhow::Result<String> {
+    let needle = format!("name=\"{name}\" value=\"");
+    let start = html
+        .find(&needle)
+        .with_context(|| format!("missing {name}"))?
+        + needle.len();
+    let end = html[start..]
+        .find('"')
+        .context("unclosed hidden field")?
+        + start;
+    Ok(html[start..end].to_string())
+}
+
+fn query_value(url: &str, key: &str) -> Option<String> {
+    let query = url.split_once('?')?.1;
+    query.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        (name == key).then(|| value.to_string())
+    })
+}
+
+async fn mcp_register(http: &Http, redirect: &str) -> anyhow::Result<String> {
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/oauth/register",
+            None,
+            Some(json!({
+                "client_name": "accept",
+                "redirect_uris": [redirect],
+                "token_endpoint_auth_method": "none"
+            })),
+        )
+        .await?;
+    assert_eq!(status, 201, "{body}");
+    let created: Value = serde_json::from_str(&body)?;
+    assert!(created.get("client_secret").is_none(), "{body}");
+    assert_eq!(created["token_endpoint_auth_method"], "none");
+    Ok(created["client_id"].as_str().unwrap().to_string())
+}
+
+async fn insert_operator(pool: &PgPool, email: &str, platform_admin: bool) -> anyhow::Result<Uuid> {
+    let id = Uuid::new_v4();
+    let hash = reactor_auth::hash_password("scripted-pass")?;
+    sqlx::query(
+        "INSERT INTO reactor.operators (id, email, name, password_hash, platform_admin) \
+         VALUES ($1, $2, 'Accept', $3, $4)",
+    )
+    .bind(id)
+    .bind(email)
+    .bind(hash)
+    .bind(platform_admin)
+    .execute(pool)
+    .await?;
+    Ok(id)
+}
+
+async fn mcp_code(
+    http: &Http,
+    client_id: &str,
+    redirect: &str,
+    email: &str,
+    scope: &str,
+    resource: &str,
+) -> anyhow::Result<String> {
+    let (status, html) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/oauth/login",
+            None,
+            Some(json!({
+                "client_id": client_id,
+                "redirect_uri": redirect,
+                "code_challenge": MCP_CHALLENGE,
+                "code_challenge_method": "S256",
+                "scope": scope,
+                "resource": resource,
+                "state": "accept",
+                "email": email,
+                "password": "scripted-pass"
+            })),
+        )
+        .await?;
+    assert_eq!(status, 200, "{html}");
+    assert!(
+        html.contains("action=\"/oauth/consent\""),
+        "developer login should reach consent: {html}"
+    );
+    let consent = hidden_value(&html, "consent")?;
+    let client = no_redirect();
+    let response = client
+        .post(Http::url(18000, None, "/oauth/consent"))
+        .json(&json!({
+            "consent": consent,
+            "client_id": client_id,
+            "redirect_uri": redirect,
+            "code_challenge": MCP_CHALLENGE,
+            "scope": scope,
+            "resource": resource,
+            "state": "accept"
+        }))
+        .send()
+        .await?;
+    assert!(
+        response.status().is_redirection(),
+        "{}",
+        response.text().await.unwrap_or_default()
+    );
+    let location = response
+        .headers()
+        .get("location")
+        .context("missing location")?
+        .to_str()?
+        .to_string();
+    query_value(&location, "code").context("missing code")
+}
+
+async fn mcp_token(http: &Http, body: Value) -> anyhow::Result<(u16, Value)> {
+    let (status, text) = http.call(18000, None, "POST", "/oauth/token", None, Some(body)).await?;
+    let value: Value = serde_json::from_str(&text).unwrap_or(json!({"raw": text}));
+    Ok((status, value))
+}
+
+async fn mcp_call(http: &Http, token: &str, method: &str, params: Value) -> anyhow::Result<Value> {
+    let (status, body) = http
+        .call(
+            18000,
+            None,
+            "POST",
+            "/mcp",
+            Some(token),
+            Some(json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    serde_json::from_str(&body).context(body)
+}
+
+async fn mcp_tool(http: &Http, token: &str, name: &str, arguments: Value) -> anyhow::Result<(bool, String)> {
+    let body = mcp_call(
+        http,
+        token,
+        "tools/call",
+        json!({"name": name, "arguments": arguments}),
+    )
+    .await?;
+    let is_error = body["result"]["isError"].as_bool().unwrap_or(false);
+    let text = body["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    Ok((is_error, text))
+}
+
+#[tokio::test]
+async fn gate_mcp_oauth() {
+    run_gate(async {
+        let http = live().await?;
+        let pool = PgPool::connect(&env("REACTOR_ACCEPT_DATABASE_URL")).await?;
+        let resource = "http://127.0.0.1:18000/mcp";
+        let redirect = "http://127.0.0.1:9/cb";
+
+        let (status, body) = http
+            .call(18000, None, "GET", "/.well-known/oauth-protected-resource", None, None)
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let protected: Value = serde_json::from_str(&body)?;
+        assert_eq!(protected["resource"], resource);
+        assert!(protected["scopes_supported"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "offline_access"));
+        let (status, body) = http
+            .call(18000, None, "GET", "/.well-known/oauth-authorization-server", None, None)
+            .await?;
+        assert_eq!(status, 200, "{body}");
+        let server: Value = serde_json::from_str(&body)?;
+        assert_eq!(server["token_endpoint_auth_methods_supported"][0], "none");
+        assert!(server["scopes_supported"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "offline_access"));
+
+        let (status, body) = http
+            .call(
+                18000,
+                None,
+                "POST",
+                "/oauth/register",
+                None,
+                Some(json!({
+                    "redirect_uris": ["http://example.com/cb"],
+                    "token_endpoint_auth_method": "none"
+                })),
+            )
+            .await?;
+        assert_eq!(status, 400, "{body}");
+        let err: Value = serde_json::from_str(&body)?;
+        assert_eq!(err["error"], "invalid_redirect_uri");
+
+        let (status, page) = http
+            .call(
+                18000,
+                None,
+                "GET",
+                &format!(
+                    "/oauth/authorize?response_type=code&client_id={}&redirect_uri={redirect}&code_challenge={MCP_CHALLENGE}&code_challenge_method=plain&resource={resource}",
+                    "missing"
+                ),
+                None,
+                None,
+            )
+            .await?;
+        assert_eq!(status, 400, "{page}");
+        assert!(page.contains("S256"));
+
+        let client_id = mcp_register(&http, redirect).await?;
+        let (status, page) = http
+            .call(
+                18000,
+                None,
+                "GET",
+                &format!(
+                    "/oauth/authorize?response_type=code&client_id={client_id}&redirect_uri={redirect}&code_challenge={MCP_CHALLENGE}&code_challenge_method=S256&scope=offline_access&resource={resource}"
+                ),
+                None,
+                None,
+            )
+            .await?;
+        assert_eq!(status, 200, "{page}");
+        assert!(page.contains("offline_access"), "{page}");
+
+        let (status, page) = http
+            .call(
+                18000,
+                None,
+                "GET",
+                &format!(
+                    "/oauth/authorize?response_type=code&client_id=https://169.254.169.254/client.json&redirect_uri={redirect}&code_challenge={MCP_CHALLENGE}&code_challenge_method=S256&resource={resource}"
+                ),
+                None,
+                None,
+            )
+            .await?;
+        assert_eq!(status, 400, "{page}");
+        assert!(page.contains("not allowed"), "{page}");
+
+        let email = format!("mcp-{}@example.com", Uuid::new_v4().simple());
+        insert_operator(&pool, &email, false).await?;
+        let code = mcp_code(&http, &client_id, redirect, &email, "operator offline_access", resource).await?;
+        sqlx::query("UPDATE reactor.oauth_codes SET expires_at = now() - interval '1 minute' WHERE code_hash = $1")
+            .bind(reactor_auth::token_hash(&code))
+            .execute(&pool)
+            .await?;
+        let (status, body) = mcp_token(
+            &http,
+            json!({
+                "grant_type": "authorization_code",
+                "code": code,
+                "code_verifier": MCP_VERIFIER,
+                "client_id": client_id,
+                "redirect_uri": redirect,
+                "resource": resource
+            }),
+        )
+        .await?;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(body["error"], "invalid_grant");
+
+        let code = mcp_code(&http, &client_id, redirect, &email, "operator offline_access", resource).await?;
+        let (status, body) = mcp_token(
+            &http,
+            json!({
+                "grant_type": "authorization_code",
+                "code": code,
+                "code_verifier": "wrong-verifier-wrong-verifier-wrong-verifier",
+                "client_id": client_id,
+                "redirect_uri": redirect,
+                "resource": resource
+            }),
+        )
+        .await?;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(body["error"], "invalid_grant");
+
+        let (status, body) = mcp_token(
+            &http,
+            json!({
+                "grant_type": "authorization_code",
+                "code": code,
+                "code_verifier": MCP_VERIFIER,
+                "client_id": client_id,
+                "redirect_uri": redirect,
+                "resource": "https://other.example/mcp"
+            }),
+        )
+        .await?;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(body["error"], "invalid_grant");
+
+        let (status, tokens) = mcp_token(
+            &http,
+            json!({
+                "grant_type": "authorization_code",
+                "code": code,
+                "code_verifier": MCP_VERIFIER,
+                "client_id": client_id,
+                "redirect_uri": redirect,
+                "resource": resource
+            }),
+        )
+        .await?;
+        assert_eq!(status, 200, "{tokens}");
+        assert!(tokens["scope"].as_str().unwrap().contains("offline_access"));
+        let refresh = tokens["refresh_token"].as_str().unwrap().to_string();
+        let (status, rotated) = mcp_token(
+            &http,
+            json!({
+                "grant_type": "refresh_token",
+                "refresh_token": refresh,
+                "client_id": client_id
+            }),
+        )
+        .await?;
+        assert_eq!(status, 200, "{rotated}");
+        let refresh_2 = rotated["refresh_token"].as_str().unwrap().to_string();
+        let (status, reused) = mcp_token(
+            &http,
+            json!({
+                "grant_type": "refresh_token",
+                "refresh_token": refresh,
+                "client_id": client_id
+            }),
+        )
+        .await?;
+        assert_eq!(status, 400, "{reused}");
+        assert_eq!(reused["error"], "invalid_grant");
+        let (status, family) = mcp_token(
+            &http,
+            json!({
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_2,
+                "client_id": client_id
+            }),
+        )
+        .await?;
+        assert_eq!(status, 400, "{family}");
+        assert_eq!(family["error"], "invalid_grant");
+
+        let code = mcp_code(&http, &client_id, redirect, &email, "operator offline_access", resource).await?;
+        let (status, tokens) = mcp_token(
+            &http,
+            json!({
+                "grant_type": "authorization_code",
+                "code": code,
+                "code_verifier": MCP_VERIFIER,
+                "client_id": client_id,
+                "redirect_uri": redirect,
+                "resource": resource
+            }),
+        )
+        .await?;
+        assert_eq!(status, 200, "{tokens}");
+        let access = tokens["access_token"].as_str().unwrap().to_string();
+        let refresh = tokens["refresh_token"].as_str().unwrap().to_string();
+
+        let open = no_redirect();
+        let denied = open
+            .post(Http::url(18000, None, "/mcp"))
+            .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}))
+            .send()
+            .await?;
+        assert_eq!(denied.status(), 401);
+        let challenge = denied
+            .headers()
+            .get("www-authenticate")
+            .context("missing challenge")?
+            .to_str()?
+            .to_string();
+        assert!(challenge.contains("resource_metadata"), "{challenge}");
+
+        let (status, login) = http
+            .call(
+                18000,
+                None,
+                "POST",
+                "/console/v1/login",
+                None,
+                Some(json!({"email": email, "password": "scripted-pass"})),
+            )
+            .await?;
+        assert_eq!(status, 200, "{login}");
+        let console_token = serde_json::from_str::<Value>(&login)?["access_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (status, _) = http
+            .call(
+                18000,
+                None,
+                "POST",
+                "/mcp",
+                Some(&console_token),
+                Some(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"})),
+            )
+            .await?;
+        assert_eq!(status, 401);
+
+        let (status, key_body) = http
+            .call(
+                18000,
+                None,
+                "POST",
+                "/console/v1/keys",
+                Some(&console_token),
+                Some(json!({"name": "accept", "scopes": ["projects.create"]})),
+            )
+            .await?;
+        assert_eq!(status, 200, "{key_body}");
+        let service_key = serde_json::from_str::<Value>(&key_body)?["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (status, _) = http
+            .call(
+                18000,
+                None,
+                "POST",
+                "/mcp",
+                Some(&service_key),
+                Some(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"})),
+            )
+            .await?;
+        assert_eq!(status, 401);
+
+        let project = create_project(&http, 18000).await?;
+        let session = signup(&http, &project).await?;
+        let (status, _) = http
+            .call(
+                18000,
+                None,
+                "POST",
+                "/mcp",
+                Some(&session.access),
+                Some(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"})),
+            )
+            .await?;
+        assert_eq!(status, 401);
+        let (status, _) = http
+            .call(
+                18001,
+                None,
+                "POST",
+                "/mcp",
+                Some(&access),
+                Some(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"})),
+            )
+            .await?;
+        assert_eq!(status, 401);
+
+        let init = mcp_call(&http, &access, "initialize", json!({"protocolVersion": "2025-06-18"})).await?;
+        assert_eq!(init["result"]["serverInfo"]["name"], "reactor");
+        assert_eq!(
+            init["result"]["serverInfo"]["icons"][0]["src"],
+            "http://127.0.0.1:18000/favicon.png"
+        );
+        let (icon_status, _) = http.call(18000, None, "GET", "/favicon.ico", None, None).await?;
+        assert_eq!(icon_status, 200);
+        let (icon_status, _) = http.call(18000, None, "GET", "/favicon.png", None, None).await?;
+        assert_eq!(icon_status, 200);
+        let listed = mcp_call(&http, &access, "tools/list", json!({})).await?;
+        let names = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"list_projects".into()));
+        assert!(names.contains(&"create_project".into()));
+
+        let read_code = mcp_code(
+            &http,
+            &client_id,
+            redirect,
+            &email,
+            "operator:read offline_access",
+            resource,
+        )
+        .await?;
+        let (status, read_tokens) = mcp_token(
+            &http,
+            json!({
+                "grant_type": "authorization_code",
+                "code": read_code,
+                "code_verifier": MCP_VERIFIER,
+                "client_id": client_id,
+                "redirect_uri": redirect,
+                "resource": resource
+            }),
+        )
+        .await?;
+        assert_eq!(status, 200, "{read_tokens}");
+        let read = read_tokens["access_token"].as_str().unwrap().to_string();
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM reactor.projects")
+            .fetch_one(&pool)
+            .await?;
+        let (is_error, text) = mcp_tool(&http, &read, "create_project", json!({"name": "blocked"})).await?;
+        assert!(is_error, "{text}");
+        let after: i64 = sqlx::query_scalar("SELECT count(*) FROM reactor.projects")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(before, after);
+
+        let (is_error, text) = mcp_tool(&http, &access, "create_project", json!({"name": "MCP"})).await?;
+        assert!(!is_error, "{text}");
+        let created: Value = serde_json::from_str(&text)?;
+        let pref = created["ref"].as_str().context("ref")?.to_string();
+        assert!(created.get("anon").and_then(|v| v.as_str()).is_some(), "{text}");
+        assert!(!text.contains("service"), "{text}");
+
+        for name in [
+            "add_member",
+            "apply_migration",
+            "deploy_function",
+            "promote_function",
+            "demote_function",
+            "set_function_env",
+            "unset_function_env",
+            "put_site_file",
+            "delete_site_file",
+            "set_site_env",
+            "unset_site_env",
+            "create_bucket",
+            "put_object",
+            "delete_object",
+            "create_queue",
+            "send_queue",
+            "create_user",
+            "rotate_project_keys",
+            "migrate_all",
+        ] {
+            let (is_error, text) = mcp_tool(
+                &http,
+                &read,
+                name,
+                json!({"ref": pref, "write": true, "sql": "drop table if exists nope"}),
+            )
+            .await?;
+            assert!(is_error, "{name}: {text}");
+        }
+        let (is_error, text) = mcp_tool(
+            &http,
+            &read,
+            "execute_sql",
+            json!({"ref": pref, "sql": "create table mcp_blocked (id int)", "write": true}),
+        )
+        .await?;
+        assert!(is_error, "{text}");
+
+        let other = format!("other-{}@example.com", Uuid::new_v4().simple());
+        insert_operator(&pool, &other, false).await?;
+        let other_code = mcp_code(&http, &client_id, redirect, &other, "operator", resource).await?;
+        let (status, other_tokens) = mcp_token(
+            &http,
+            json!({
+                "grant_type": "authorization_code",
+                "code": other_code,
+                "code_verifier": MCP_VERIFIER,
+                "client_id": client_id,
+                "redirect_uri": redirect,
+                "resource": resource
+            }),
+        )
+        .await?;
+        assert_eq!(status, 200, "{other_tokens}");
+        let other_access = other_tokens["access_token"].as_str().unwrap();
+        let (is_error, text) = mcp_tool(&http, other_access, "schema", json!({"ref": pref})).await?;
+        assert!(is_error, "{text}");
+
+        let (is_error, text) = mcp_tool(&http, &access, "whoami", json!({})).await?;
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(&http, &access, "list_projects", json!({})).await?;
+        assert!(text.contains(&pref), "{text}");
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(&http, &access, "get_project", json!({"ref": pref})).await?;
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(
+            &http,
+            &access,
+            "execute_sql",
+            json!({"ref": pref, "sql": "select 1 as n", "write": false}),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(
+            &http,
+            &access,
+            "execute_sql",
+            json!({"ref": pref, "sql": "create table mcp_notes (id int)", "write": true}),
+        )
+        .await?;
+        assert!(is_error, "{text}");
+        let (is_error, text) = mcp_tool(
+            &http,
+            &access,
+            "execute_sql",
+            json!({"ref": pref, "sql": "create table mcp_notes (id int)", "write": true, "confirm": true}),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(
+            &http,
+            &access,
+            "apply_migration",
+            json!({"ref": pref, "version": "0001_mcp_note.sql", "sql": "create table mcp_mig (id int)"}),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(&http, &access, "schema", json!({"ref": pref})).await?;
+        assert!(text.contains("mcp_notes"), "{text}");
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(
+            &http,
+            &access,
+            "list_rows",
+            json!({"ref": pref, "table": "mcp_notes"}),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(
+            &http,
+            &access,
+            "deploy_function",
+            json!({"ref": pref, "name": "echo", "source": "process.stdout.write('ok');"}),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(
+            &http,
+            &access,
+            "promote_function",
+            json!({"ref": pref, "name": "echo", "version": 1}),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(
+            &http,
+            &access,
+            "set_function_env",
+            json!({"ref": pref, "name": "echo", "key": "TOKEN", "value": "fn-secret"}),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(&http, &access, "list_functions", json!({"ref": pref})).await?;
+        assert!(text.contains("echo"), "{text}");
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(
+            &http,
+            &access,
+            "put_site_file",
+            json!({"ref": pref, "path": "index.html", "content": "hello"}),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(
+            &http,
+            &access,
+            "set_site_env",
+            json!({"ref": pref, "key": "SECRET", "value": "site-secret-value", "visible": false}),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(&http, &access, "list_site_env", json!({"ref": pref})).await?;
+        assert!(!text.contains("site-secret-value"), "{text}");
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(&http, &access, "list_sites", json!({"ref": pref})).await?;
+        assert!(text.contains("index.html"), "{text}");
+        assert!(!is_error, "{text}");
+        let (is_error, _) = mcp_tool(&http, &access, "list_site_deployments", json!({"ref": pref})).await?;
+        assert!(!is_error);
+        let (is_error, text) = mcp_tool(
+            &http,
+            &access,
+            "create_bucket",
+            json!({"ref": pref, "name": "files", "public": false}),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(
+            &http,
+            &access,
+            "put_object",
+            json!({"ref": pref, "bucket": "files", "path": "note.txt", "content": "hello"}),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(&http, &access, "list_buckets", json!({"ref": pref})).await?;
+        assert!(text.contains("files"), "{text}");
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(&http, &access, "list_objects", json!({"ref": pref})).await?;
+        assert!(text.contains("note.txt"), "{text}");
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(
+            &http,
+            &access,
+            "create_queue",
+            json!({"ref": pref, "name": "jobs"}),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(
+            &http,
+            &access,
+            "send_queue",
+            json!({"ref": pref, "name": "jobs", "message": {"n": 1}}),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(
+            &http,
+            &access,
+            "peek_queue",
+            json!({"ref": pref, "name": "jobs"}),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let member = format!("member-{}@example.com", Uuid::new_v4().simple());
+        let (is_error, text) = mcp_tool(
+            &http,
+            &access,
+            "add_member",
+            json!({"ref": pref, "email": member, "name": "Member", "role": "developer", "password": "scripted-pass"}),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(&http, &access, "list_members", json!({"ref": pref})).await?;
+        assert!(text.contains(&member), "{text}");
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(
+            &http,
+            &access,
+            "create_user",
+            json!({"ref": pref, "email": "user@example.com", "password": "scripted-pass"}),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(&http, &access, "logs", json!({"ref": pref})).await?;
+        assert!(text.contains("mcp"), "{text}");
+        assert!(!is_error, "{text}");
+        let (is_error, text) = mcp_tool(&http, &access, "rotate_project_keys", json!({"ref": pref})).await?;
+        assert!(!is_error, "{text}");
+        assert!(!text.contains("eyJ"), "{text}");
+
+        let (status, minted) = http
+            .call(
+                18000,
+                None,
+                "POST",
+                "/console/v1/mcp/keys",
+                Some(&console_token),
+                Some(json!({"name": "agent", "scope": "operator"})),
+            )
+            .await?;
+        assert_eq!(status, 200, "{minted}");
+        let minted: Value = serde_json::from_str(&minted)?;
+        let mcp_key = minted["token"].as_str().unwrap();
+        assert!(mcp_key.starts_with("rtr_mcp_"));
+        let (is_error, text) = mcp_tool(&http, mcp_key, "whoami", json!({})).await?;
+        assert!(!is_error, "{text}");
+        let key_id = minted["id"].as_str().unwrap();
+        let (status, body) = http
+            .call(
+                18000,
+                None,
+                "DELETE",
+                &format!("/console/v1/mcp/keys/{key_id}"),
+                Some(&console_token),
+                None,
+            )
+            .await?;
+        assert_eq!(status, 204, "{body}");
+        let (status, _) = http
+            .call(
+                18000,
+                None,
+                "POST",
+                "/mcp",
+                Some(mcp_key),
+                Some(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"})),
+            )
+            .await?;
+        assert_eq!(status, 401);
+
+        let (status, sessions) = http
+            .call(18000, None, "GET", "/console/v1/oauth/sessions", Some(&console_token), None)
+            .await?;
+        assert_eq!(status, 200, "{sessions}");
+        let sessions: Value = serde_json::from_str(&sessions)?;
+        let family_id: Uuid = sqlx::query_scalar(
+            "SELECT family_id FROM reactor.oauth_refresh WHERE token_hash = $1",
+        )
+        .bind(reactor_auth::token_hash(&refresh))
+        .fetch_one(&pool)
+        .await?;
+        assert!(
+            sessions.as_array().unwrap().iter().any(|item| {
+                item["family_id"].as_str() == Some(family_id.to_string().as_str())
+            }),
+            "{sessions}"
+        );
+        let (status, body) = http
+            .call(
+                18000,
+                None,
+                "DELETE",
+                &format!("/console/v1/oauth/sessions/{family_id}"),
+                Some(&console_token),
+                None,
+            )
+            .await?;
+        assert_eq!(status, 204, "{body}");
+        let (status, revoked) = mcp_token(
+            &http,
+            json!({
+                "grant_type": "refresh_token",
+                "refresh_token": refresh,
+                "client_id": client_id
+            }),
+        )
+        .await?;
+        assert_eq!(status, 400, "{revoked}");
+        assert_eq!(revoked["error"], "invalid_grant");
+
+        let owner = format!("owner-{}@example.com", Uuid::new_v4().simple());
+        insert_operator(&pool, &owner, true).await?;
+        let (status, html) = http
+            .call(
+                18000,
+                None,
+                "POST",
+                "/oauth/login",
+                None,
+                Some(json!({
+                    "client_id": client_id,
+                    "redirect_uri": redirect,
+                    "code_challenge": MCP_CHALLENGE,
+                    "code_challenge_method": "S256",
+                    "scope": "operator",
+                    "resource": resource,
+                    "email": owner,
+                    "password": "scripted-pass"
+                })),
+            )
+            .await?;
+        assert_eq!(status, 200, "{html}");
+        assert!(!html.contains("action=\"/oauth/consent\""), "{html}");
+        assert!(html.contains("Second factor"), "{html}");
+        Ok(())
+    })
+    .await;
 }

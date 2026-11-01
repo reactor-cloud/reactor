@@ -50,7 +50,25 @@ jobs:
           java-version: "17"
       - uses: aws-actions/setup-sam@v2
       - name: Accept
-        run: scripts/accept.sh
+        run: |
+          if [ -f scripts/accept.sh ]; then
+            scripts/accept.sh
+          else
+            v2/scripts/accept.sh
+          fi
+      - name: Console contract
+        run: |
+          if [ -f Cargo.toml ]; then ROOT="$PWD"; else ROOT="$PWD/v2"; fi
+          mkdir -p "$ROOT/.data"
+          (cd "$ROOT" && cargo run -p reactor-accept --bin seed-console)
+          set -a
+          source "$ROOT/.data/console.env"
+          set +a
+          docker run --rm --network host \
+            -e REACTOR_CONSOLE_URL -e REACTOR_CONSOLE_EMAIL \
+            -e REACTOR_CONSOLE_PASSWORD -e REACTOR_CONSOLE_RECOVERY \
+            -v "$ROOT/apps/console-ios/ConsoleCore:/src" -w /src swift:6.0 \
+            swift test
       - name: JavaScript client
         if: hashFiles('v2/sdks/js/package.json') != ''
         working-directory: v2/sdks/js
@@ -85,4 +103,19 @@ jobs:
           docker run --rm --network host \
             -e REACTOR_URL -e REACTOR_ANON_KEY \
             -v "$PWD/sdks/swift:/src" -w /src swift:6.0 \
+            swift test
+  console:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Console route spec
+        run: |
+          if [ -f Cargo.toml ]; then ROOT="$PWD"; else ROOT="$PWD/v2"; fi
+          (cd "$ROOT" && cargo test -p reactor-server console_spec_lists_every_route)
+      - name: Console core
+        run: |
+          if [ -f Cargo.toml ]; then ROOT="$PWD"; else ROOT="$PWD/v2"; fi
+          docker run --rm \
+            -v "$ROOT/apps/console-ios/ConsoleCore:/src" -w /src swift:6.0 \
             swift test

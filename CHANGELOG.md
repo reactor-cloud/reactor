@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.26.11-beta1
+
+Package manifests use `1.26.11-beta1`. The JavaScript, Swift, and Kotlin clients stay on `1.26.10-beta9`.
+
+- Each cluster hosts MCP at `/mcp`. An agent signs in once in the browser and keeps a refresh token for 30 days. Owners, admins, and platform admins finish a second factor before a code is issued. The console Agents page revokes a session. A key minted there is sent as `Authorization: Bearer rtr_mcp_...`.
+- Cursor's hosted callback is answered with a 303, so the browser returns to the desktop app with a GET.
+- A SwiftUI operator console talks to `/console/v1`.
+
 ## v1.26.10-beta9
 
 Package manifests use `1.26.10-beta9`. The JavaScript, Swift, and Kotlin clients move to `1.26.10-beta9`.

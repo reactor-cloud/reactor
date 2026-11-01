@@ -21,6 +21,7 @@ import {
   FolderKanban,
   Globe,
   HardDrive,
+  Bot,
   KeyRound,
   LayoutDashboard,
   ListOrdered,
@@ -279,6 +280,10 @@ export function Shell() {
               <DropdownMenuItem onClick={() => navigate("/keys")}>
                 <KeyRound className="size-4" />
                 Service keys
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => navigate("/agents")}>
+                <Bot className="size-4" />
+                Agents
               </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={() => {

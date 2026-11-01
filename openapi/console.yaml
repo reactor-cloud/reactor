@@ -1,0 +1,1622 @@
+openapi: 3.0.3
+info:
+  title: Reactor console
+  version: 1.26.11-beta1
+  license:
+    name: BUSL-1.1
+    url: https://mariadb.com/bsl11/
+  description: |
+    Operator API for one Reactor cluster. Human sessions are bearer JWTs
+    with audience console. This file is the contract for the mobile console.
+    The project API stays in openapi.yaml.
+servers:
+  - url: http://127.0.0.1:18000
+    description: Local cluster
+tags:
+  - name: console
+paths:
+  "/console/v1/setup":
+    get:
+      tags: [console]
+      summary: Whether the cluster still needs its first operator
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    post:
+      tags: [console]
+      summary: Create the cluster name and the first platform admin
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/setup/restart":
+    post:
+      tags: [console]
+      summary: Delete operators and the cluster name while no project exists
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/login":
+    post:
+      tags: [console]
+      summary: Password check. Returns a session, an MFA token, or an enrollment token
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/me":
+    get:
+      tags: [console]
+      summary: Signed-in operator, cluster name, and project memberships
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/extensions":
+    get:
+      tags: [console]
+      summary: Loaded extensions. Queue appears when name is queue
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/keys":
+    get:
+      tags: [console]
+      summary: List console service keys
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    post:
+      tags: [console]
+      summary: Mint a console service key. Token is returned once
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/keys/{id}":
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+        description: Key id
+    delete:
+      tags: [console]
+      summary: Revoke a console service key
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/cluster":
+    get:
+      tags: [console]
+      summary: Cluster health, place, and projects
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    post:
+      tags: [console]
+      summary: Rename the cluster
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/cluster/email":
+    get:
+      tags: [console]
+      summary: Cluster SMTP settings. Password is write-only
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    put:
+      tags: [console]
+      summary: Replace cluster SMTP settings
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/operators":
+    get:
+      tags: [console]
+      summary: List console operators
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    post:
+      tags: [console]
+      summary: Create a console operator
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/operators/{operator_id}":
+    parameters:
+      - name: operator_id
+        in: path
+        required: true
+        schema: {type: string}
+        description: Operator id
+    post:
+      tags: [console]
+      summary: Set the platform admin flag
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    delete:
+      tags: [console]
+      summary: Delete an operator
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/operators/{operator_id}/projects/{pref}":
+    parameters:
+      - name: operator_id
+        in: path
+        required: true
+        schema: {type: string}
+        description: Operator id
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    post:
+      tags: [console]
+      summary: Grant a project role
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    delete:
+      tags: [console]
+      summary: Remove project access
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects":
+    get:
+      tags: [console]
+      summary: Projects this operator can open
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    post:
+      tags: [console]
+      summary: Create a project. Anon and service keys are returned once
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    post:
+      tags: [console]
+      summary: Rename a project
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    delete:
+      tags: [console]
+      summary: Delete a project
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/keys":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    post:
+      tags: [console]
+      summary: Rotate the anon and service keys. Plaintext is returned once
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/members":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Project members
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    post:
+      tags: [console]
+      summary: Add a member and set a password
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/users":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Project end users
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/users/{user_id}":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: user_id
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project user id
+    get:
+      tags: [console]
+      summary: One project user
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    delete:
+      tags: [console]
+      summary: Delete a project user
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/users/{user_id}/password":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: user_id
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project user id
+    post:
+      tags: [console]
+      summary: Set a project user's password
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/schemas":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Schemas owned by this project
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/schema":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Tables and columns in one schema
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/tables":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    post:
+      tags: [console]
+      summary: Create a table
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/migrations":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Stored migrations
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    post:
+      tags: [console]
+      summary: Apply a migration
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/migrations/{version}/revert":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: version
+        in: path
+        required: true
+        schema: {type: string}
+        description: Migration version
+    post:
+      tags: [console]
+      summary: Revert a revertable migration
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/sql":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    post:
+      tags: [console]
+      summary: Run SQL or store it as a migration. Dangerous SQL returns 409 until confirm is true
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/database/reset":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    post:
+      tags: [console]
+      summary: Rotate the project database role password
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/tables/{table}":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: table
+        in: path
+        required: true
+        schema: {type: string}
+        description: Table name
+    get:
+      tags: [console]
+      summary: Paged rows
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    post:
+      tags: [console]
+      summary: Insert a row
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/tables/{table}/rows":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: table
+        in: path
+        required: true
+        schema: {type: string}
+        description: Table name
+    post:
+      tags: [console]
+      summary: Update one cell
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    delete:
+      tags: [console]
+      summary: Delete a row by primary key
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/objects":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Object keys under the project
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    delete:
+      tags: [console]
+      summary: Delete an object
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/objects/url":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    post:
+      tags: [console]
+      summary: Signed or public URL for an object
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/objects/upload":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    post:
+      tags: [console]
+      summary: Presign a PUT. The bytes go to that URL without the console bearer
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/buckets":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Buckets
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    post:
+      tags: [console]
+      summary: Create a bucket
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/buckets/{name}":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: name
+        in: path
+        required: true
+        schema: {type: string}
+        description: Name
+    patch:
+      tags: [console]
+      summary: Change whether a bucket is public
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/functions":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Function versions
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/functions/{name}":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: name
+        in: path
+        required: true
+        schema: {type: string}
+        description: Name
+    post:
+      tags: [console]
+      summary: Deploy a zip body as application/zip
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/functions/{name}/promote":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: name
+        in: path
+        required: true
+        schema: {type: string}
+        description: Name
+    post:
+      tags: [console]
+      summary: Pin a version
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/functions/{name}/demote":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: name
+        in: path
+        required: true
+        schema: {type: string}
+        description: Name
+    post:
+      tags: [console]
+      summary: Clear the pin
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/functions/{name}/invoke":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: name
+        in: path
+        required: true
+        schema: {type: string}
+        description: Name
+    post:
+      tags: [console]
+      summary: Invoke live or one version
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/functions/{name}/stats":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: name
+        in: path
+        required: true
+        schema: {type: string}
+        description: Name
+    get:
+      tags: [console]
+      summary: 24-hour function traffic
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/functions/{name}/env":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: name
+        in: path
+        required: true
+        schema: {type: string}
+        description: Name
+    get:
+      tags: [console]
+      summary: Function variable names
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    post:
+      tags: [console]
+      summary: Set a function variable. The value is never read back
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/functions/{name}/env/{key}":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: name
+        in: path
+        required: true
+        schema: {type: string}
+        description: Name
+      - name: key
+        in: path
+        required: true
+        schema: {type: string}
+        description: Variable name
+    delete:
+      tags: [console]
+      summary: Remove a function variable
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/queues":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Queues
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    post:
+      tags: [console]
+      summary: Create a queue
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/queues/{name}/send":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: name
+        in: path
+        required: true
+        schema: {type: string}
+        description: Name
+    post:
+      tags: [console]
+      summary: Send a message
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/queues/{name}/peek":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: name
+        in: path
+        required: true
+        schema: {type: string}
+        description: Name
+    get:
+      tags: [console]
+      summary: Peek messages
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/queues/{name}/subscriptions":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: name
+        in: path
+        required: true
+        schema: {type: string}
+        description: Name
+    get:
+      tags: [console]
+      summary: Function subscribers
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/sites":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Site files, domains, and URL
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/site/stats":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: 24-hour site traffic
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/site/deployments":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Recent site deployments
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/site/deployments/{id}":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+        description: Key id
+    get:
+      tags: [console]
+      summary: One deployment and its files
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/site/env":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Site variables
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    post:
+      tags: [console]
+      summary: Set a site variable
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/site/env/{key}":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: key
+        in: path
+        required: true
+        schema: {type: string}
+        description: Variable name
+    delete:
+      tags: [console]
+      summary: Remove a site variable
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/site/domains":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Custom domains
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    post:
+      tags: [console]
+      summary: Add a domain
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/site/domains/{host}/verify":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: host
+        in: path
+        required: true
+        schema: {type: string}
+        description: Domain host
+    post:
+      tags: [console]
+      summary: Check the DNS TXT record
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/site/domains/{host}":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: host
+        in: path
+        required: true
+        schema: {type: string}
+        description: Domain host
+    delete:
+      tags: [console]
+      summary: Remove a domain
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/logs":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Recent project logs
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/overview":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Counts and 24-hour traffic
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/auth":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Email verification and MFA flags
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    put:
+      tags: [console]
+      summary: Update email verification and MFA flags
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/auth/providers":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: OAuth providers
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    post:
+      tags: [console]
+      summary: Create or update an OAuth provider
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/auth/providers/{provider}":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: provider
+        in: path
+        required: true
+        schema: {type: string}
+        description: OAuth provider id
+    delete:
+      tags: [console]
+      summary: Remove an OAuth provider
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/email":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Project SMTP
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    put:
+      tags: [console]
+      summary: Update project SMTP. Password is write-only
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/email/cluster":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    put:
+      tags: [console]
+      summary: Allow this project to use cluster SMTP
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/email/test":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    post:
+      tags: [console]
+      summary: Send a test message
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/email/templates":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    get:
+      tags: [console]
+      summary: Email templates
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/email/templates/{name}":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: name
+        in: path
+        required: true
+        schema: {type: string}
+        description: Name
+    get:
+      tags: [console]
+      summary: One template
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    put:
+      tags: [console]
+      summary: Save a template
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    delete:
+      tags: [console]
+      summary: Delete a template that is not reserved
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/email/templates/{name}/reset":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+      - name: name
+        in: path
+        required: true
+        schema: {type: string}
+        description: Name
+    post:
+      tags: [console]
+      summary: Restore a reserved template
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/mfa/totp/start":
+    post:
+      tags: [console]
+      summary: Start authenticator enrollment
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/mfa/totp/confirm":
+    post:
+      tags: [console]
+      summary: Confirm an authenticator code
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/mfa/totp/reset":
+    post:
+      tags: [console]
+      summary: Replace the pending authenticator secret
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/mfa/passkey/register/options":
+    post:
+      tags: [console]
+      summary: WebAuthn registration options
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/mfa/passkey/register":
+    post:
+      tags: [console]
+      summary: Finish passkey registration
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/mfa/finish":
+    post:
+      tags: [console]
+      summary: Issue the session after both factors are enrolled
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/mfa/passkey/options":
+    post:
+      tags: [console]
+      summary: WebAuthn sign-in options
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/mfa/passkey/verify":
+    post:
+      tags: [console]
+      summary: Finish passkey sign-in
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/mfa/totp":
+    post:
+      tags: [console]
+      summary: Finish sign-in with an authenticator code
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/mfa/recovery":
+    post:
+      tags: [console]
+      summary: Finish sign-in with a recovery code
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/agent/threads":
+    get:
+      tags: [console]
+      summary: Recent operator threads
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+    post:
+      tags: [console]
+      summary: Start a thread
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/agent/models":
+    get:
+      tags: [console]
+      summary: Models the operator can pick
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/agent/latest":
+    get:
+      tags: [console]
+      summary: Latest thread
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/agent/threads/{id}":
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+        description: Key id
+    get:
+      tags: [console]
+      summary: One thread, including whether it is still running
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/agent/threads/{id}/messages":
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+        description: Key id
+    post:
+      tags: [console]
+      summary: Post a message and start the turn
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/agent/threads/{id}/run":
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+        description: Key id
+    post:
+      tags: [console]
+      summary: Platform operator secret only. The console app does not call this
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+components:
+  securitySchemes:
+    consoleBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Operator JWT with audience console, or a short-lived MFA or setup token on the enrollment routes.

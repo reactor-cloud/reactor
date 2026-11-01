@@ -179,6 +179,22 @@ pub fn mount(app: Router<crate::AppCtx>) -> Router<crate::AppCtx> {
             "/console/v1/projects/{pref}/site/domains/{host}",
             delete(remove_site_domain),
         )
+        .route(
+            "/console/v1/oauth/sessions",
+            get(crate::oauth_as::list_sessions),
+        )
+        .route(
+            "/console/v1/oauth/sessions/{family}",
+            delete(crate::oauth_as::revoke_session),
+        )
+        .route(
+            "/console/v1/mcp/keys",
+            get(crate::oauth_as::list_mcp_keys).post(crate::oauth_as::create_mcp_key),
+        )
+        .route(
+            "/console/v1/mcp/keys/{id}",
+            delete(crate::oauth_as::revoke_mcp_key),
+        )
         .route("/console/v1/projects/{pref}/logs", get(logs))
         .route("/console/v1/projects/{pref}/overview", get(overview))
         .route("/console", get(spa_index))
@@ -2180,10 +2196,7 @@ async fn object_url(
     }
     if let Some((bucket, _)) = crate::buckets::bucket_and_name(&project.pref, &body.key) {
         let pool = data_pool(&state, project.id).await?;
-        if crate::buckets::bucket_is_public(&pool, &project.pref, &bucket)
-            .await?
-            == Some(true)
-        {
+        if crate::buckets::bucket_is_public(&pool, &project.pref, &bucket).await? == Some(true) {
             let url = reactor_storage::public_object_url(
                 &crate::storage_public_host(&state.config, &project.pref),
                 &bucket,
@@ -3171,7 +3184,7 @@ fn env_key(secret: &str) -> [u8; 32] {
     key
 }
 
-fn seal_env(secret: &str, plain: &str) -> Result<(Vec<u8>, Vec<u8>), ApiError> {
+pub(crate) fn seal_env(secret: &str, plain: &str) -> Result<(Vec<u8>, Vec<u8>), ApiError> {
     use aes_gcm::aead::{Aead, KeyInit};
     use aes_gcm::{Aes256Gcm, Nonce};
     let cipher = Aes256Gcm::new_from_slice(&env_key(secret)).map_err(internal)?;
@@ -3209,7 +3222,7 @@ pub(crate) fn reserved_env_key(key: &str) -> bool {
     upper == "PATH" || upper == "HOME" || key.starts_with("REACTOR_")
 }
 
-fn acceptable_function_env_key(key: &str) -> bool {
+pub(crate) fn acceptable_function_env_key(key: &str) -> bool {
     valid_env_key(key) && !reserved_env_key(key)
 }
 
@@ -3801,5 +3814,68 @@ mod tests {
         assert_eq!(loaded_left, vec![("TOKEN".into(), "alpha".into())]);
         assert_eq!(loaded_right, vec![("TOKEN".into(), "beta".into())]);
         assert!(loaded_other.is_empty());
+    }
+
+    #[test]
+    fn console_spec_lists_every_route() {
+        let sources = [
+            include_str!("console.rs"),
+            include_str!("mfa.rs"),
+            include_str!("email.rs"),
+            include_str!("project_auth.rs"),
+            include_str!("agent.rs"),
+        ];
+        let yaml = include_str!("../../../openapi/console.yaml");
+        let mut missing = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for source in sources {
+            for path in mounted_console_routes(source) {
+                if seen.insert(path.clone()) && !yaml_declares(yaml, &path) {
+                    missing.push(path);
+                }
+            }
+        }
+        assert!(
+            seen.len() > 60,
+            "route scan found {}, expected the mounted console API",
+            seen.len()
+        );
+        assert!(missing.is_empty(), "console.yaml is missing {missing:?}");
+    }
+
+    fn mounted_console_routes(source: &str) -> Vec<String> {
+        let needle = ".route(";
+        let mut found = Vec::new();
+        let mut offset = 0;
+        while let Some(rel) = source[offset..].find(needle) {
+            let start = offset + rel + needle.len();
+            let tail = source[start..].trim_start();
+            if let Some(path) = first_quoted(tail) {
+                if path.starts_with("/console/v1") {
+                    found.push(path);
+                }
+            }
+            offset = start;
+        }
+        found
+    }
+
+    fn first_quoted(source: &str) -> Option<String> {
+        let bytes = source.as_bytes();
+        if bytes.first() != Some(&b'"') {
+            return None;
+        }
+        let rest = &source[1..];
+        let end = rest.find('"')?;
+        Some(rest[..end].to_string())
+    }
+
+    fn yaml_declares(yaml: &str, path: &str) -> bool {
+        yaml.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed == format!("{path}:")
+                || trimmed == format!("\"{path}\":")
+                || trimmed == format!("'{path}':")
+        })
     }
 }

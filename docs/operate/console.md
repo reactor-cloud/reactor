@@ -22,7 +22,7 @@ An operator can belong to many projects and still have no row in `reactor.users`
 | Project users, team, rotate API keys | admin |
 | Rename or delete the project | owner |
 
-Console JWTs use the same Ed25519 key with `aud=console` and `role=console`. They are rejected by `/auth/v1` and `/data/v1`. Project JWTs are rejected by `/console/v1`.
+Console JWTs use the same Ed25519 key with `aud=console` and `role=console`. A session lasts 12 hours. They are rejected by `/auth/v1`, `/data/v1`, and `/mcp`. Project JWTs are rejected by `/console/v1`.
 
 A console service key uses `aud=console-key`. A human session mints it from the avatar menu or with `reactor service-keys`. The secret is shown once. `projects.create` can create projects. `projects.migrate`, `projects.sql`, `auth.settings`, `auth.providers`, `auth.email`, and `auth.users` work only on projects that same key created. `auth.email` includes allowing cluster SMTP on those projects when the operator is a platform admin. The cluster mail server stays closed. Revoke deletes the key and clears that stamp.
 
@@ -30,7 +30,7 @@ An operator can enroll a TOTP authenticator or a passkey. When one is enrolled, 
 
 ## Pages
 
-Outside a project the sidebar lists Projects and, for a platform admin, Cluster and Console users. Service keys is in the avatar menu for every operator. Inside a project it lists Overview, API keys, Auth, Data, SQL, Storage, Functions, and Sites, with Logs, Team, and Settings at the bottom. Queue is in that list only when the cluster has the queue extension.
+Outside a project the sidebar lists Projects and, for a platform admin, Cluster and Console users. Service keys and Agents are in the avatar menu for every operator. Inside a project it lists Overview, API keys, Auth, Data, SQL, Storage, Functions, and Sites, with Logs, Team, and Settings at the bottom. Queue is in that list only when the cluster has the queue extension.
 
 - **Overview** shows the project name, counts, and 24-hour traffic for auth, database, functions, and sites. Any other log kind from that window is a chart too, including queue.
 - **API keys** shows the anon key and a hidden service key, with reveal, copy, and rotate. Plaintext exists only at create and rotate.
@@ -47,6 +47,18 @@ Outside a project the sidebar lists Projects and, for a platform admin, Cluster 
 The cluster pill shows the name, where it runs (local Docker, AWS, or Fly), and a health dot. The Cluster page stores the cluster SMTP server. A project uses it for auth mail only after a platform admin allows that project, and only when the project has no SMTP host of its own. Creating a project in the UI returns the same pair the CLI prints once: `anon_key` and `service_key`. Later visits show the anon key and a hidden service key. Reveal does not mint a new secret. Rotate does, and the previous keys stop working.
 
 A console call with a project user token is rejected. A project call with a console token is rejected. Login with MFA enrolled returns a short-lived token that only `/console/v1/mfa` accepts until the second factor succeeds.
+
+## iOS
+
+The iPhone app signs into the same `/console/v1` API. The source is `apps/console-ios`. It stores each cluster session in the Keychain: the cluster URL, the operator email, and the console JWT.
+
+Opening a saved cluster uses that token. The app asks for the password again in the last 10 minutes of the 12-hour session, and for an authenticator code or a backup code when the account requires a second factor. Enrolling a passkey still happens in the browser console. The app can hold more than one cluster. Logging out of one does not remove the others.
+
+This session is the console JWT. It is not the MCP refresh token. An agent signed in through `/mcp` keeps a separate 30-day refresh. See [MCP](/operate/mcp/).
+
+## Agents
+
+The avatar menu opens Agents. It lists browser MCP sessions and bearer keys for this operator. Revoking a session deletes that refresh family. Creating a key shows `rtr_mcp_...` once. Revoking the key makes the next call with it fail. Details are on [MCP](/operate/mcp/).
 
 ## Agent
 

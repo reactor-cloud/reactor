@@ -45,7 +45,9 @@ pub fn public_base(cdn_public_base: &str, project_base: &str, bucket: &str) -> S
     } else {
         cdn_public_base
     };
-    public_object_url(host, bucket, "").trim_end_matches('/').to_string()
+    public_object_url(host, bucket, "")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 pub fn split_public_path(path: &str) -> Result<(String, String), ApiError> {
@@ -226,15 +228,14 @@ pub async fn set_bucket_public(
             Ok(())
         }
         Ok(_) => Err(ApiError::new(StatusCode::NOT_FOUND, "bucket not found")),
-        Err(err) if missing_table(&err) => Err(ApiError::new(StatusCode::NOT_FOUND, "bucket not found")),
+        Err(err) if missing_table(&err) => {
+            Err(ApiError::new(StatusCode::NOT_FOUND, "bucket not found"))
+        }
         Err(err) => Err(internal(err)),
     }
 }
 
-pub async fn list_buckets(
-    pool: &PgPool,
-    pref: &str,
-) -> Result<Vec<(String, bool)>, ApiError> {
+pub async fn list_buckets(pool: &PgPool, pref: &str) -> Result<Vec<(String, bool)>, ApiError> {
     let schema = schema_name(pref)?;
     let mut tx = pool.begin().await.map_err(internal)?;
     sqlx::query("SET LOCAL ROLE \"service\"")

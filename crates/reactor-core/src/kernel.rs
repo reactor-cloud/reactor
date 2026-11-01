@@ -78,6 +78,25 @@ where
             }),
         });
         self.hook(Hook {
+            name: "oauth".into(),
+            every: Duration::from_secs(60),
+            run: Arc::new(|ctx| {
+                Box::pin(async move {
+                    sqlx::query("DELETE FROM reactor.oauth_codes WHERE expires_at < now()")
+                        .execute(&ctx.pool)
+                        .await
+                        .map(|_| ())
+                        .map_err(|err| err.to_string())?;
+                    sqlx::query("DELETE FROM reactor.oauth_refresh WHERE expires_at < now()")
+                        .execute(&ctx.pool)
+                        .await
+                        .map(|_| ())
+                        .map_err(|err| err.to_string())?;
+                    Ok(())
+                })
+            }),
+        });
+        self.hook(Hook {
             name: "prune".into(),
             every: Duration::from_secs(60),
             run: Arc::new(|ctx| {
@@ -159,7 +178,7 @@ mod tests {
 
     #[test]
     fn hook_locks_stay_off_the_cron_and_migrate_keys() {
-        for name in ["cron", "sites", "sessions", "prune", "queue"] {
+        for name in ["cron", "sites", "sessions", "prune", "queue", "oauth"] {
             let key = hook_lock_key(name);
             assert_ne!(key, 4_815_162_342, "{name}");
             assert_ne!(key, 4_815_162_343, "{name}");

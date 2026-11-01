@@ -31,6 +31,10 @@ export REACTOR_DNS_STUB_HOST="$PWD/.data/dns/stub.json"
 export REACTOR_CLI="$PWD/target/debug/reactor-cli"
 export REACTOR_BUILDER="$PWD/target/debug/reactor-builder"
 
+keydir="${TMPDIR:-/tmp}/reactor-v2-accept-keys"
+mkdir -p "$keydir"
+docker cp reactor-v2-app:/keys/private.pem "$keydir/private.pem"
+
 echo "gates"
 cargo test -p reactor-accept -- --test-threads=1 --nocapture
 
@@ -45,6 +49,7 @@ echo "lambda runtime emulator"
 docker rm -f reactor-v2-rie >/dev/null 2>&1 || true
 docker run -d --name reactor-v2-rie \
   --entrypoint /usr/local/bin/aws-lambda-rie \
+  --network reactor-v2_default \
   -p 127.0.0.1:19090:8080 \
   --add-host=host.docker.internal:host-gateway \
   -e REACTOR_HANDLER=platform \

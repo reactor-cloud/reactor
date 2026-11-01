@@ -9,6 +9,7 @@ import { Functions } from "@/functions"
 import { Auth, MfaSettings, Providers } from "@/auth"
 import { EmailSettings, Templates } from "@/email"
 import { Home, Keys, Login, Setup, Team, UserDetail, Users } from "@/pages"
+import { Agents } from "@/agents"
 import { ServiceKeys } from "@/service-keys"
 import { Settings } from "@/settings"
 import { Sites } from "@/sites"
@@ -32,6 +33,7 @@ export default function App() {
           <Route path="cluster" element={<Cluster />} />
           <Route path="users" element={<Operators />} />
           <Route path="keys" element={<ServiceKeys />} />
+          <Route path="agents" element={<Agents />} />
           <Route path="p/:ref" element={<Overview />} />
           <Route path="p/:ref/keys" element={<Keys />} />
           <Route path="p/:ref/auth" element={<Auth />}>
