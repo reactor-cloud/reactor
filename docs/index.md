@@ -7,7 +7,7 @@ Reactor is a Rust backend for web and mobile apps. One server gives you auth, Po
 
 A project you create on your machine uses the same client URLs it will use on any other cluster. The JavaScript client follows the same shape as the Supabase client, so an app written against `createClient`, `auth`, and `from()` can move with small changes.
 
-**v1.26.11-beta1.** Package version `1.26.11-beta1`. The API can still change before a stable tag. The JavaScript, Swift, and Kotlin clients stay on `1.26.10-beta9`.
+**v1.26.11-beta2.** Package version `1.26.11-beta2`. The API can still change before a stable tag. The JavaScript, Swift, and Kotlin clients stay on `1.26.10-beta9`.
 
 ## Install
 

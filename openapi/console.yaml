@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Reactor console
-  version: 1.26.11-beta1
+  version: 1.26.11-beta2
   license:
     name: BUSL-1.1
     url: https://mariadb.com/bsl11/
@@ -857,6 +857,23 @@ paths:
     post:
       tags: [console]
       summary: Set a function variable. The value is never read back
+      security:
+        - consoleBearer: []
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Console token required or the second factor was rejected
+  "/console/v1/projects/{pref}/env/copy":
+    parameters:
+      - name: pref
+        in: path
+        required: true
+        schema: {type: string}
+        description: Project ref
+    post:
+      tags: [console]
+      summary: Copy sealed variables between the site and one function
       security:
         - consoleBearer: []
       responses:

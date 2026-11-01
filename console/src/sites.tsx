@@ -187,6 +187,7 @@ function Variables({ refId }: { refId: string }) {
   const canEdit = role === "owner" || role === "admin"
   const [rows, setRows] = useState<EnvRow[]>([])
   const [visible, setVisible] = useState(false)
+  const [fnName, setFnName] = useState("")
   const [error, setError] = useState("")
 
   function load() {
@@ -223,6 +224,21 @@ function Variables({ refId }: { refId: string }) {
     load()
   }
 
+  async function copy(from: "site" | "function", to: "site" | "function") {
+    const functionName = fnName.trim()
+    if (!functionName) return
+    setError("")
+    try {
+      await api(`/console/v1/projects/${refId}/env/copy`, {
+        method: "POST",
+        body: JSON.stringify({ from, to, function: functionName }),
+      })
+      load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "copy failed")
+    }
+  }
+
   return (
     <>
       <div className="flex h-12 shrink-0 items-center border-b px-3">
@@ -239,6 +255,18 @@ function Variables({ refId }: { refId: string }) {
             </label>
             <Button type="submit" size="sm">
               Save
+            </Button>
+            <Input
+              value={fnName}
+              placeholder="function_name"
+              onChange={(event) => setFnName(event.target.value)}
+              className="w-40"
+            />
+            <Button type="button" size="sm" variant="outline" disabled={!fnName.trim()} onClick={() => copy("function", "site")}>
+              Copy from function
+            </Button>
+            <Button type="button" size="sm" variant="outline" disabled={!fnName.trim()} onClick={() => copy("site", "function")}>
+              Copy to function
             </Button>
           </form>
         )}

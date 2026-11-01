@@ -211,8 +211,36 @@ enum EnvCmd {
 
 #[derive(Subcommand)]
 enum FunctionsCmd {
-    Promote { name: String, version: i32 },
-    Demote { name: String },
+    /// List, set, unset, or copy one function's variables.
+    Env {
+        name: String,
+        #[command(subcommand)]
+        cmd: Option<FunctionEnvCmd>,
+    },
+    Promote {
+        name: String,
+        version: i32,
+    },
+    Demote {
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum FunctionEnvCmd {
+    Set {
+        key: String,
+        value: String,
+    },
+    Unset {
+        key: String,
+    },
+    Copy {
+        #[arg(long, conflicts_with = "to", required_unless_present = "to")]
+        from: Option<String>,
+        #[arg(long, conflicts_with = "from", required_unless_present = "from")]
+        to: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -360,6 +388,18 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Cluster => cluster(context).await,
         Cmd::Functions { cmd } => match cmd {
             None => functions(context).await,
+            Some(FunctionsCmd::Env { name, cmd }) => match cmd {
+                None => function_env(context, &name).await,
+                Some(FunctionEnvCmd::Set { key, value }) => {
+                    set_function_env(context, &name, &key, &value).await
+                }
+                Some(FunctionEnvCmd::Unset { key }) => {
+                    unset_function_env(context, &name, &key).await
+                }
+                Some(FunctionEnvCmd::Copy { from, to }) => {
+                    copy_function_env(context, &name, from.as_deref(), to.as_deref()).await
+                }
+            },
             Some(FunctionsCmd::Promote { name, version }) => {
                 promote_function(context, &name, version).await
             }
@@ -1254,6 +1294,83 @@ fn value_text(value: &Value) -> String {
     }
 }
 
+async fn function_env(context: Option<&str>, name: &str) -> anyhow::Result<()> {
+    let pref = pref()?;
+    let body = console(
+        context,
+        Scope::Project,
+        "GET",
+        &format!("/console/v1/projects/{pref}/functions/{name}/env"),
+        None,
+    )
+    .await?;
+    for row in rows_of(&body) {
+        println!("{}\t{}", field(row, "key"), field(row, "updated_at"));
+    }
+    Ok(())
+}
+
+async fn set_function_env(
+    context: Option<&str>,
+    name: &str,
+    key: &str,
+    value: &str,
+) -> anyhow::Result<()> {
+    let pref = pref()?;
+    let body = console(
+        context,
+        Scope::Project,
+        "POST",
+        &format!("/console/v1/projects/{pref}/functions/{name}/env"),
+        Some(serde_json::json!({ "key": key, "value": value })),
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&body)?);
+    Ok(())
+}
+
+async fn unset_function_env(context: Option<&str>, name: &str, key: &str) -> anyhow::Result<()> {
+    let pref = pref()?;
+    let body = console(
+        context,
+        Scope::Project,
+        "DELETE",
+        &format!("/console/v1/projects/{pref}/functions/{name}/env/{key}"),
+        None,
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&body)?);
+    Ok(())
+}
+
+async fn copy_function_env(
+    context: Option<&str>,
+    name: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> anyhow::Result<()> {
+    let (from_kind, to_kind) = match (from, to) {
+        (Some("site"), None) => ("site", "function"),
+        (None, Some("site")) => ("function", "site"),
+        _ => anyhow::bail!("copy direction must be site"),
+    };
+    let pref = pref()?;
+    let body = console(
+        context,
+        Scope::Project,
+        "POST",
+        &format!("/console/v1/projects/{pref}/env/copy"),
+        Some(serde_json::json!({
+            "from": from_kind,
+            "to": to_kind,
+            "function": name,
+        })),
+    )
+    .await?;
+    println!("{}", serde_json::to_string_pretty(&body)?);
+    Ok(())
+}
+
 async fn functions(context: Option<&str>) -> anyhow::Result<()> {
     let pref = pref()?;
     let body = console(
@@ -2035,5 +2152,54 @@ mod context_tests {
         assert!(store.contexts["local"].email.is_empty());
         assert_eq!(store.contexts["local"].url, "http://127.0.0.1:18000");
         assert_eq!(store.current, "local");
+    }
+
+    #[test]
+    fn functions_env_commands_parse() {
+        Cli::try_parse_from(["reactor", "functions", "env", "chat"]).unwrap();
+        Cli::try_parse_from([
+            "reactor",
+            "functions",
+            "env",
+            "chat",
+            "set",
+            "TOKEN",
+            "alpha",
+        ])
+        .unwrap();
+        Cli::try_parse_from(["reactor", "functions", "env", "chat", "unset", "TOKEN"]).unwrap();
+        Cli::try_parse_from([
+            "reactor",
+            "functions",
+            "env",
+            "chat",
+            "copy",
+            "--from",
+            "site",
+        ])
+        .unwrap();
+        Cli::try_parse_from([
+            "reactor",
+            "functions",
+            "env",
+            "chat",
+            "copy",
+            "--to",
+            "site",
+        ])
+        .unwrap();
+        assert!(Cli::try_parse_from(["reactor", "functions", "env", "chat", "copy"]).is_err());
+        assert!(Cli::try_parse_from([
+            "reactor",
+            "functions",
+            "env",
+            "chat",
+            "copy",
+            "--from",
+            "site",
+            "--to",
+            "site"
+        ])
+        .is_err());
     }
 }

@@ -149,6 +149,10 @@ pub fn mount(app: Router<crate::AppCtx>) -> Router<crate::AppCtx> {
             "/console/v1/projects/{pref}/functions/{name}/env/{key}",
             delete(delete_function_env),
         )
+        .route(
+            "/console/v1/projects/{pref}/env/copy",
+            post(copy_project_env),
+        )
         .route("/console/v1/projects/{pref}/sites", get(sites))
         .route("/console/v1/projects/{pref}/site/stats", get(site_stats))
         .route(
@@ -3029,7 +3033,7 @@ async fn set_function_env(
     .execute(&state.pool)
     .await
     .map_err(internal)?;
-    crate::republish_function(&state, project.id, &project.pref, &name).await?;
+    crate::apply_function_env(&state, project.id, &project.pref, &name).await?;
     Ok(Json(json!({ "key": body.key })))
 }
 
@@ -3049,8 +3053,76 @@ async fn delete_function_env(
     .execute(&state.pool)
     .await
     .map_err(internal)?;
-    crate::republish_function(&state, project.id, &project.pref, &name).await?;
+    crate::apply_function_env(&state, project.id, &project.pref, &name).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct EnvCopyBody {
+    from: String,
+    to: String,
+    function: String,
+}
+
+async fn copy_env_rows(
+    pool: &sqlx::PgPool,
+    project_id: Uuid,
+    from: &str,
+    to: &str,
+    function: &str,
+) -> Result<u64, ApiError> {
+    if from == to || (from != "site" && from != "function") || (to != "site" && to != "function") {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid copy"));
+    }
+    if !crate::valid_name(function) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid function name",
+        ));
+    }
+    let sql = if to == "function" {
+        "INSERT INTO reactor.function_env (project_id, name, key, nonce, ciphertext) \
+         SELECT project_id, $2, key, nonce, ciphertext FROM reactor.site_env WHERE project_id = $1 \
+         ON CONFLICT (project_id, name, key) DO UPDATE \
+         SET nonce = EXCLUDED.nonce, ciphertext = EXCLUDED.ciphertext, updated_at = now()"
+    } else {
+        "INSERT INTO reactor.site_env (project_id, key, visibility, nonce, ciphertext) \
+         SELECT project_id, key, 'secret', nonce, ciphertext FROM reactor.function_env \
+         WHERE project_id = $1 AND name = $2 \
+         ON CONFLICT (project_id, key) DO UPDATE \
+         SET visibility = 'secret', nonce = EXCLUDED.nonce, ciphertext = EXCLUDED.ciphertext, updated_at = now()"
+    };
+    let result = sqlx::query(sql)
+        .bind(project_id)
+        .bind(function)
+        .execute(pool)
+        .await
+        .map_err(internal)?;
+    Ok(result.rows_affected())
+}
+
+async fn copy_project_env(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(pref): Path<String>,
+    Json(body): Json<EnvCopyBody>,
+) -> Result<Json<Value>, ApiError> {
+    let operator = require_operator(&state, &headers).await?;
+    let project = require_member(&state, &operator, &pref, "admin").await?;
+    let copied = copy_env_rows(
+        &state.pool,
+        project.id,
+        &body.from,
+        &body.to,
+        &body.function,
+    )
+    .await?;
+    if body.to == "function" {
+        crate::apply_function_env(&state, project.id, &project.pref, &body.function).await?;
+    } else if body.to == "site" {
+        state.sites.stop(project.id).await;
+    }
+    Ok(Json(json!({ "copied": copied })))
 }
 
 fn function_env_public(key: &str, updated: &str) -> Value {
@@ -3459,7 +3531,7 @@ async fn console_queue_subscriptions(
 #[cfg(test)]
 mod tests {
     use super::{
-        acceptable_function_env_key, console_key_scope, function_env_public,
+        acceptable_function_env_key, console_key_scope, copy_env_rows, function_env_public,
         load_function_env_from, migration_issue, open_env, owned_schema, seal_env, site_env_public,
         site_public_url,
     };
@@ -3814,6 +3886,107 @@ mod tests {
         assert_eq!(loaded_left, vec![("TOKEN".into(), "alpha".into())]);
         assert_eq!(loaded_right, vec![("TOKEN".into(), "beta".into())]);
         assert!(loaded_other.is_empty());
+    }
+
+    #[tokio::test]
+    async fn copy_moves_the_sealed_value_and_leaves_the_other_function() {
+        let Ok(pool) = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_secs(2))
+            .connect("postgres://reactor:reactor@127.0.0.1:5440/reactor")
+            .await
+        else {
+            return;
+        };
+        let project_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM reactor.projects LIMIT 1")
+                .fetch_optional(&pool)
+                .await
+                .ok()
+                .flatten();
+        let Some(project_id) = project_id else {
+            return;
+        };
+        sqlx::query(include_str!("../../../sql/control/004_function_env.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let left = format!("zz_copy_{}", Uuid::new_v4().simple());
+        let right = format!("zz_copy_{}", Uuid::new_v4().simple());
+        let token_key = format!("ZZT_{}", Uuid::new_v4().simple());
+        let keep_key = format!("KEEP_{}", Uuid::new_v4().simple());
+        let secret = "function-env-test";
+        let (token_nonce, token_ciphertext) =
+            seal_env(secret, "alpha-value").unwrap_or_else(|err| panic!("{}", err.text()));
+        sqlx::query(
+            "INSERT INTO reactor.site_env (project_id, key, visibility, nonce, ciphertext) VALUES ($1, $2, 'secret', $3, $4)",
+        )
+        .bind(project_id)
+        .bind(&token_key)
+        .bind(&token_nonce)
+        .bind(&token_ciphertext)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (keep_nonce, keep_ciphertext) =
+            seal_env(secret, "stay").unwrap_or_else(|err| panic!("{}", err.text()));
+        sqlx::query(
+            "INSERT INTO reactor.function_env (project_id, name, key, nonce, ciphertext) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(project_id)
+        .bind(&left)
+        .bind(&keep_key)
+        .bind(&keep_nonce)
+        .bind(&keep_ciphertext)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let copied = copy_env_rows(&pool, project_id, "site", "function", &left)
+            .await
+            .unwrap_or_else(|err| panic!("{}", err.text()));
+        assert_eq!(copied, 1);
+        let loaded_left = load_function_env_from(&pool, secret, project_id, &left)
+            .await
+            .unwrap_or_else(|err| panic!("{}", err.text()));
+        let loaded_right = load_function_env_from(&pool, secret, project_id, &right)
+            .await
+            .unwrap_or_else(|err| panic!("{}", err.text()));
+        assert!(loaded_left
+            .iter()
+            .any(|(key, value)| key == &token_key && value == "alpha-value"));
+        assert!(loaded_left
+            .iter()
+            .any(|(key, value)| key == &keep_key && value == "stay"));
+        assert!(loaded_right.iter().all(|(key, _)| key != &token_key));
+        let copied_back = copy_env_rows(&pool, project_id, "function", "site", &left)
+            .await
+            .unwrap_or_else(|err| panic!("{}", err.text()));
+        assert!(copied_back >= 1);
+        let site_keep: (String, Vec<u8>, Vec<u8>) = sqlx::query_as(
+            "SELECT visibility, nonce, ciphertext FROM reactor.site_env WHERE project_id = $1 AND key = $2",
+        )
+        .bind(project_id)
+        .bind(&keep_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(site_keep.0, "secret");
+        assert_eq!(
+            open_env(secret, &site_keep.1, &site_keep.2)
+                .unwrap_or_else(|err| panic!("{}", err.text())),
+            "stay"
+        );
+        sqlx::query("DELETE FROM reactor.site_env WHERE project_id = $1 AND key = ANY($2)")
+            .bind(project_id)
+            .bind(vec![token_key, keep_key.clone()])
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM reactor.function_env WHERE project_id = $1 AND name = ANY($2)")
+            .bind(project_id)
+            .bind(vec![left, right])
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[test]
