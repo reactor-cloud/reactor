@@ -50,7 +50,9 @@ In `lambda` runtime, a promote publishes the user's zip as its own Lambda. The A
 
 ## Variables
 
-Each function has its own variables, stored encrypted. The value is never read back. Invoke injects only that function's set. Set them in the console on the function's Variables tab, or through `POST /console/v1/projects/{ref}/functions/{name}/env`.
+Each function has its own variables, stored encrypted. The value is never read back. A Bun invoke injects only that function's set on each call. Set them in the console on the function's Variables tab, with `reactor functions env <name>`, `reactor functions env <name> set <key> <value>`, and `reactor functions env <name> unset <key>`, or through `POST /console/v1/projects/{ref}/functions/{name}/env`. `reactor functions env <name> copy --from site` and `copy --to site` copy the sealed values between the site and that function.
+
+On Lambda, the function receives those variables when the configuration update finishes. Saving a variable updates the Lambda environment. It does not upload a new zip, and the value is not applied at invoke time.
 
 ## Schedules
 

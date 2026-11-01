@@ -18,7 +18,7 @@ brew tap reactor-cloud/reactor
 brew install reactor
 ```
 
-`v1.26.11-beta1` builds from source and needs Rust, which Homebrew installs as a build dependency. The formula uses tag `v1.26.11-beta1` of [reactor-cloud/reactor](https://github.com/reactor-cloud/reactor).
+`v1.26.11-beta2` builds from source and needs Rust, which Homebrew installs as a build dependency. The formula uses tag `v1.26.11-beta2` of [reactor-cloud/reactor](https://github.com/reactor-cloud/reactor).
 
 From a clone of the server repository, at the repository root:
 
@@ -106,6 +106,11 @@ reactor cluster
 reactor functions
 reactor functions promote ping 2
 reactor functions demote ping
+reactor functions env ping
+reactor functions env ping set TOKEN secret-value
+reactor functions env ping unset TOKEN
+reactor functions env ping copy --from site
+reactor functions env ping copy --to site
 reactor sites
 reactor sites env
 reactor sites env set SITE_BANNER "hello" --visible
@@ -120,7 +125,7 @@ reactor queue send jobs '{"hello":"world"}'
 reactor queue read jobs
 ```
 
-`members add` creates an operator if the email is new. The role default is `developer`. `functions` lists deployments. Promote pins a version. Demote clears the pin. `sites env set` without `--visible` stores a secret, and the value is not returned later.
+`members add` creates an operator if the email is new. The role default is `developer`. `functions` lists deployments. Promote pins a version. Demote clears the pin. `functions env` lists a function's variable names and when they changed. It never prints a value. `set` and `unset` write that function's variables. `copy --from site` and `copy --to site` move the sealed values between the site and that function. One of those flags is required. `sites env set` without `--visible` stores a secret, and the value is not returned later.
 
 `queue` needs `REACTOR_EXTENSIONS=queue` on the server and the linked service key. `send` takes `--delay-secs`. `read` takes `--vt-secs` and `--qty`. Peek, delete, archive, and subscriptions are on the HTTP API.
 

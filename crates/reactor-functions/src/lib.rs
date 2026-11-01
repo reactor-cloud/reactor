@@ -21,7 +21,68 @@ pub struct PublishRecord {
 pub trait FunctionPublisher: Send + Sync {
     async fn publish(&self, name: &str, zip: &[u8], env: &[(&str, &str)])
         -> anyhow::Result<String>;
+    async fn apply_env(&self, name: &str, env: &[(&str, &str)]) -> anyhow::Result<()>;
     async fn invoke(&self, name: &str, payload: &[u8]) -> anyhow::Result<Vec<u8>>;
+}
+
+#[derive(Debug)]
+pub enum PutEnvError {
+    Busy,
+    Failed(String),
+}
+
+impl std::fmt::Display for PutEnvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PutEnvError::Busy => write!(f, "function update conflict"),
+            PutEnvError::Failed(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for PutEnvError {}
+
+pub fn is_conflict_code(code: Option<&str>) -> bool {
+    code == Some("ResourceConflictException")
+}
+
+#[async_trait]
+trait EnvControl: Send + Sync {
+    async fn in_progress(&self) -> Result<bool, PutEnvError>;
+    async fn put(&self) -> Result<(), PutEnvError>;
+}
+
+pub(crate) async fn put_env_when_idle(
+    control: &impl EnvControl,
+    pause: std::time::Duration,
+    attempts: u32,
+) -> Result<(), PutEnvError> {
+    wait_until_idle(control, pause, attempts).await?;
+    loop {
+        match control.put().await {
+            Ok(()) => return wait_until_idle(control, pause, attempts).await,
+            Err(PutEnvError::Busy) => wait_until_idle(control, pause, attempts).await?,
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+async fn wait_until_idle(
+    control: &impl EnvControl,
+    pause: std::time::Duration,
+    attempts: u32,
+) -> Result<(), PutEnvError> {
+    for _ in 0..attempts {
+        if !control.in_progress().await? {
+            return Ok(());
+        }
+        if !pause.is_zero() {
+            tokio::time::sleep(pause).await;
+        }
+    }
+    Err(PutEnvError::Failed(
+        "function configuration stayed busy".into(),
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -30,9 +91,16 @@ pub struct InvokeRecord {
     pub payload: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ApplyRecord {
+    pub name: String,
+    pub env: Vec<(String, String)>,
+}
+
 pub struct FakePublisher {
     pub records: Mutex<Vec<PublishRecord>>,
     pub invokes: Mutex<Vec<InvokeRecord>>,
+    pub applies: Mutex<Vec<ApplyRecord>>,
 }
 
 impl FakePublisher {
@@ -40,6 +108,7 @@ impl FakePublisher {
         Self {
             records: Mutex::new(Vec::new()),
             invokes: Mutex::new(Vec::new()),
+            applies: Mutex::new(Vec::new()),
         }
     }
 }
@@ -65,6 +134,15 @@ impl FunctionPublisher for FakePublisher {
             env,
         });
         Ok(name.to_string())
+    }
+
+    async fn apply_env(&self, name: &str, env: &[(&str, &str)]) -> anyhow::Result<()> {
+        let env = scrub_env(env);
+        self.applies.lock().unwrap().push(ApplyRecord {
+            name: name.to_string(),
+            env,
+        });
+        Ok(())
     }
 
     async fn invoke(&self, name: &str, payload: &[u8]) -> anyhow::Result<Vec<u8>> {
@@ -96,27 +174,63 @@ impl AwsLambdaPublisher {
     }
 
     async fn put_env(&self, name: &str, env: &[(String, String)]) -> anyhow::Result<()> {
-        for _ in 0..8 {
-            let mut environment = aws_sdk_lambda::types::Environment::builder();
-            for (key, value) in env {
-                environment = environment.variables(key, value);
-            }
-            match self
-                .client
-                .update_function_configuration()
-                .function_name(name)
-                .environment(environment.build())
-                .send()
-                .await
-            {
-                Ok(_) => return Ok(()),
-                Err(err) if err.to_string().contains("ResourceConflict") => {
-                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                }
-                Err(err) => return Err(err.into()),
-            }
+        let control = AwsEnv {
+            client: &self.client,
+            name,
+            env,
+        };
+        put_env_when_idle(&control, std::time::Duration::from_millis(500), 60)
+            .await
+            .map_err(|err| anyhow::anyhow!(err.to_string()))
+    }
+}
+
+struct AwsEnv<'a> {
+    client: &'a aws_sdk_lambda::Client,
+    name: &'a str,
+    env: &'a [(String, String)],
+}
+
+#[async_trait]
+impl EnvControl for AwsEnv<'_> {
+    async fn in_progress(&self) -> Result<bool, PutEnvError> {
+        use aws_sdk_lambda::types::LastUpdateStatus;
+        let cfg = self
+            .client
+            .get_function_configuration()
+            .function_name(self.name)
+            .send()
+            .await
+            .map_err(|err| PutEnvError::Failed(err.to_string()))?;
+        match cfg.last_update_status() {
+            Some(LastUpdateStatus::InProgress) => Ok(true),
+            Some(LastUpdateStatus::Failed) => Err(PutEnvError::Failed(
+                cfg.last_update_status_reason()
+                    .unwrap_or("function update failed")
+                    .to_string(),
+            )),
+            _ => Ok(false),
         }
-        anyhow::bail!("function configuration stayed busy")
+    }
+
+    async fn put(&self) -> Result<(), PutEnvError> {
+        use aws_sdk_lambda::error::ProvideErrorMetadata;
+        let mut environment = aws_sdk_lambda::types::Environment::builder();
+        for (key, value) in self.env {
+            environment = environment.variables(key, value);
+        }
+        match self
+            .client
+            .update_function_configuration()
+            .function_name(self.name)
+            .environment(environment.build())
+            .send()
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(err) if is_conflict_code(err.code()) => Err(PutEnvError::Busy),
+            Err(err) => Err(PutEnvError::Failed(err.to_string())),
+        }
     }
 }
 
@@ -173,6 +287,11 @@ impl FunctionPublisher for AwsLambdaPublisher {
         }
         create.send().await?;
         Ok(name.to_string())
+    }
+
+    async fn apply_env(&self, name: &str, env: &[(&str, &str)]) -> anyhow::Result<()> {
+        let env = scrub_env(env);
+        self.put_env(name, &env).await
     }
 
     async fn invoke(&self, name: &str, payload: &[u8]) -> anyhow::Result<Vec<u8>> {
@@ -394,6 +513,80 @@ pub fn zip_single(name: &str, contents: &str) -> anyhow::Result<Bytes> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+
+    struct Script {
+        busy_left: Mutex<u32>,
+        always: bool,
+        put_results: Mutex<VecDeque<Result<(), PutEnvError>>>,
+        puts: Mutex<Vec<()>>,
+        put_after_polls: Mutex<Vec<u32>>,
+        polls: Mutex<u32>,
+        put_while_busy: Mutex<bool>,
+    }
+
+    impl Script {
+        fn idle_after(busy: u32) -> Self {
+            Self::new(busy, false, vec![Ok(())])
+        }
+
+        fn conflict_once() -> Self {
+            Self::new(0, false, vec![Err(PutEnvError::Busy), Ok(())])
+        }
+
+        fn always_busy() -> Self {
+            Self::new(0, true, vec![])
+        }
+
+        fn fail_put(message: &str) -> Self {
+            Self::new(0, false, vec![Err(PutEnvError::Failed(message.into()))])
+        }
+
+        fn new(busy: u32, always: bool, results: Vec<Result<(), PutEnvError>>) -> Self {
+            Self {
+                busy_left: Mutex::new(busy),
+                always,
+                put_results: Mutex::new(results.into()),
+                puts: Mutex::new(Vec::new()),
+                put_after_polls: Mutex::new(Vec::new()),
+                polls: Mutex::new(0),
+                put_while_busy: Mutex::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl EnvControl for Script {
+        async fn in_progress(&self) -> Result<bool, PutEnvError> {
+            *self.polls.lock().unwrap() += 1;
+            if self.always {
+                return Ok(true);
+            }
+            let mut left = self.busy_left.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return Ok(true);
+            }
+            Ok(false)
+        }
+
+        async fn put(&self) -> Result<(), PutEnvError> {
+            let left = *self.busy_left.lock().unwrap();
+            if left > 0 || self.always {
+                *self.put_while_busy.lock().unwrap() = true;
+            }
+            self.puts.lock().unwrap().push(());
+            self.put_after_polls
+                .lock()
+                .unwrap()
+                .push(*self.polls.lock().unwrap());
+            let result = self.put_results.lock().unwrap().pop_front().unwrap();
+            if matches!(result, Err(PutEnvError::Busy)) {
+                *self.busy_left.lock().unwrap() = 1;
+            }
+            result
+        }
+    }
 
     #[test]
     fn scrub_keeps_user_secrets_and_drops_reserved_names() {
@@ -491,6 +684,66 @@ mod tests {
         let invokes = fake.invokes.lock().unwrap();
         assert_eq!(invokes[0].name, "fn");
         assert_eq!(invokes[0].payload, br#"{"ok":true}"#);
+    }
+
+    #[tokio::test]
+    async fn put_env_waits_until_the_code_update_is_idle() {
+        let gate = Script::idle_after(2);
+        put_env_when_idle(&gate, std::time::Duration::ZERO, 60)
+            .await
+            .unwrap();
+        assert_eq!(gate.puts.lock().unwrap().len(), 1);
+        assert_eq!(gate.put_after_polls.lock().unwrap()[0], 3);
+        assert!(!*gate.put_while_busy.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn put_env_retries_a_conflict_then_succeeds() {
+        let gate = Script::conflict_once();
+        put_env_when_idle(&gate, std::time::Duration::ZERO, 60)
+            .await
+            .unwrap();
+        assert_eq!(gate.puts.lock().unwrap().len(), 2);
+        assert!(!*gate.put_while_busy.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn put_env_stops_when_the_function_stays_busy() {
+        let gate = Script::always_busy();
+        let err = put_env_when_idle(&gate, std::time::Duration::ZERO, 4)
+            .await
+            .unwrap_err();
+        assert!(gate.puts.lock().unwrap().is_empty());
+        assert_eq!(err.to_string(), "function configuration stayed busy");
+    }
+
+    #[tokio::test]
+    async fn put_env_returns_a_non_conflict_immediately() {
+        let gate = Script::fail_put("no such function");
+        let err = put_env_when_idle(&gate, std::time::Duration::ZERO, 60)
+            .await
+            .unwrap_err();
+        assert_eq!(gate.puts.lock().unwrap().len(), 1);
+        assert_eq!(err.to_string(), "no such function");
+    }
+
+    #[test]
+    fn conflict_is_the_error_code_not_the_message() {
+        let message = "The operation cannot be performed at this time. An update is in progress";
+        assert!(!message.contains("ResourceConflict"));
+        assert!(is_conflict_code(Some("ResourceConflictException")));
+        assert!(!is_conflict_code(None));
+        assert!(!is_conflict_code(Some("ValidationException")));
+    }
+
+    #[tokio::test]
+    async fn apply_env_does_not_record_a_code_publish() {
+        let fake = FakePublisher::new();
+        fake.apply_env("pref-chat", &[("OPENROUTER_API_KEY", "x")])
+            .await
+            .unwrap();
+        assert!(fake.records.lock().unwrap().is_empty());
+        assert_eq!(fake.applies.lock().unwrap().len(), 1);
     }
 
     #[test]

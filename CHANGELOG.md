@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.26.11-beta2
+
+Package manifests use `1.26.11-beta2`. The JavaScript, Swift, and Kotlin clients stay on `1.26.10-beta9`.
+
+- `reactor functions env` lists a function's variable names and when they changed. It never prints a value. `set`, `unset`, and `copy --from site` or `copy --to site` write that function's sealed variables. The console Variables tab does the same.
+- On Lambda, saving a variable updates the function environment once the function is idle. It does not upload a new zip.
+
 ## v1.26.11-beta1
 
 Package manifests use `1.26.11-beta1`. The JavaScript, Swift, and Kotlin clients stay on `1.26.10-beta9`.

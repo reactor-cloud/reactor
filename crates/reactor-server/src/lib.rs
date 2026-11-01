@@ -1736,6 +1736,44 @@ pub(crate) async fn republish_function(
     publish_lambda(state, pref, name, &bytes).await
 }
 
+pub(crate) async fn apply_function_env(
+    state: &AppState,
+    project_id: Uuid,
+    pref: &str,
+    name: &str,
+) -> Result<(), ApiError> {
+    if state.config.functions_runtime != "lambda" {
+        return Ok(());
+    }
+    let key: Option<String> = sqlx::query_scalar(
+        "SELECT d.blob_key FROM reactor.deployments d \
+         WHERE d.project_id = $1 AND d.name = $2 AND d.version = COALESCE( \
+           (SELECT p.version FROM reactor.function_pins p WHERE p.project_id = d.project_id AND p.name = d.name), \
+           (SELECT MAX(m.version) FROM reactor.deployments m WHERE m.project_id = d.project_id AND m.name = d.name) \
+         )",
+    )
+    .bind(project_id)
+    .bind(name)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
+    let Some(_key) = key else {
+        return Ok(());
+    };
+    let function_env = console::load_function_env(state, project_id, name).await?;
+    let env = lambda_env(pref, &function_env);
+    let env_ref: Vec<(&str, &str)> = env
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    state
+        .publisher
+        .apply_env(&format!("{pref}-{name}"), &env_ref)
+        .await
+        .map_err(internal)?;
+    Ok(())
+}
+
 pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && !name.contains('/')
@@ -2929,6 +2967,14 @@ mod tests {
     fn lambda_pool_leaves_room_for_the_agent_lock() {
         assert_eq!(pool_max_connections("lambda"), 2);
         assert_eq!(pool_max_connections("listen"), 8);
+    }
+
+    #[test]
+    fn lambda_env_keeps_the_project_ref_and_the_function_keys() {
+        let env = lambda_env("pref", &[("OPENROUTER_API_KEY".into(), "x".into())]);
+        let keys: Vec<&str> = env.iter().map(|(key, _)| key.as_str()).collect();
+        assert!(keys.contains(&"REACTOR_PROJECT_REF"));
+        assert!(keys.contains(&"OPENROUTER_API_KEY"));
     }
 
     #[test]

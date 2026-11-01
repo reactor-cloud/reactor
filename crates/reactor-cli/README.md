@@ -38,6 +38,10 @@ A password flag or `REACTOR_PASSWORD` skips the prompt.
 | `db migrate --all` | Apply control-plane SQL. `--dry-run` only lists refs |
 | `db tables` / `db rows <table>` | Read the linked project |
 | `functions` / `functions promote` / `functions demote` | List deployments, or pin and unpin a version |
+| `functions env <name>` | List that function's variable names. The value is never printed |
+| `functions env <name> set <key> <value>` | Store one sealed variable |
+| `functions env <name> unset <key>` | Remove one variable |
+| `functions env <name> copy --from site` / `copy --to site` | Copy sealed variables between the site and that function |
 | `sites` / `sites env set` / `sites env unset` | Site status and variables. Omit `--visible` to store a secret |
 | `logs` / `users` / `storage` / `cluster` | Recent lines, project users, buckets, cluster health |
 | `members add` | Invite an operator. Role defaults to `developer` |

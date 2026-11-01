@@ -345,6 +345,19 @@ function FunctionEnv({ refId, name }: { refId: string; name: string }) {
     load()
   }
 
+  async function copy(from: "site" | "function", to: "site" | "function") {
+    setError("")
+    try {
+      await api(`/console/v1/projects/${refId}/env/copy`, {
+        method: "POST",
+        body: JSON.stringify({ from, to, function: name }),
+      })
+      load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "copy failed")
+    }
+  }
+
   return (
     <>
       <div className="flex h-12 shrink-0 items-center border-b px-3">
@@ -357,6 +370,12 @@ function FunctionEnv({ refId, name }: { refId: string; name: string }) {
             <Input name="value" type="password" placeholder="Value" required className="w-64" />
             <Button type="submit" size="sm">
               Save
+            </Button>
+            <Button type="button" size="sm" variant="outline" onClick={() => copy("site", "function")}>
+              Copy from site
+            </Button>
+            <Button type="button" size="sm" variant="outline" onClick={() => copy("function", "site")}>
+              Copy to site
             </Button>
           </form>
         )}
