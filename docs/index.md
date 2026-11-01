@@ -7,7 +7,7 @@ Reactor is a Rust backend for web and mobile apps. One server gives you auth, Po
 
 A project you create on your machine uses the same client URLs it will use on any other cluster. The JavaScript client follows the same shape as the Supabase client, so an app written against `createClient`, `auth`, and `from()` can move with small changes.
 
-**v1.26.10-beta9.** Package version `1.26.10-beta9`. The API can still change before a stable tag.
+**v1.26.11-beta1.** Package version `1.26.11-beta1`. The API can still change before a stable tag. The JavaScript, Swift, and Kotlin clients stay on `1.26.10-beta9`.
 
 ## Install
 
@@ -38,7 +38,9 @@ Swift and Kotlin are documented under [Clients](/clients/javascript/).
 | Functions | `/fn/v1` | Bun or Lambda, with versions, pins, and enqueue |
 | Queue | `/queue/v1` | Optional. Messages delivered to functions. `REACTOR_EXTENSIONS=queue` |
 | Sites | project host | Static files, a site process, or a function path |
-| Console | `/console` | Cluster admin. Separate from project users |
+| Console | `/console` | Cluster admin. Separate from project users. A session lasts 12 hours |
+| Console app | iOS | The same console API. The Keychain keeps the session until that token is near expiry |
+| MCP | `/mcp` | Operator tools for Cursor, Claude, and Codex. The refresh token lasts 30 days |
 
 ## Start here
 

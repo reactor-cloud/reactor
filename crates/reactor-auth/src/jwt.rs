@@ -30,6 +30,10 @@ pub struct TokenClaims {
     pub iat: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jti: Option<String>,
+    #[serde(default)]
+    pub iss: String,
+    #[serde(default)]
+    pub scope: String,
 }
 
 impl JwtIssuer {
@@ -92,6 +96,8 @@ impl JwtIssuer {
             iat: now,
             exp: now + ttl_secs as usize,
             jti: None,
+            iss: String::new(),
+            scope: String::new(),
         };
         let header = Header::new(Algorithm::EdDSA);
         Ok(encode(&header, &claims, &self.encoding)?)
@@ -111,6 +117,32 @@ impl JwtIssuer {
             iat: now,
             exp: now + ttl_secs as usize,
             jti: None,
+            iss: String::new(),
+            scope: String::new(),
+        };
+        let header = Header::new(Algorithm::EdDSA);
+        Ok(encode(&header, &claims, &self.encoding)?)
+    }
+
+    pub fn sign_scoped(
+        &self,
+        sub: &str,
+        aud: &str,
+        iss: &str,
+        scope: &str,
+        ttl_secs: u64,
+    ) -> anyhow::Result<String> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as usize;
+        let claims = TokenClaims {
+            sub: sub.to_string(),
+            pref: String::new(),
+            role: "mcp".into(),
+            aud: aud.to_string(),
+            iat: now,
+            exp: now + ttl_secs as usize,
+            jti: None,
+            iss: iss.to_string(),
+            scope: scope.to_string(),
         };
         let header = Header::new(Algorithm::EdDSA);
         Ok(encode(&header, &claims, &self.encoding)?)
@@ -131,6 +163,8 @@ impl JwtIssuer {
             iat: now,
             exp: now + ttl_secs as usize,
             jti: Some(random_token()),
+            iss: String::new(),
+            scope: String::new(),
         };
         let header = Header::new(Algorithm::EdDSA);
         Ok(encode(&header, &claims, &self.encoding)?)

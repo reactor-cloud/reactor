@@ -126,4 +126,6 @@ On `{ref}.{base_domain}`, `GET` and the other methods are the site. `/` serves `
 
 ## Console
 
-`/console/v1` uses a console token. The pages and role rules are in [Console](/operate/console/). The first call is `GET /console/v1/setup`, then `POST /console/v1/setup` or `POST /console/v1/login`.
+`/console/v1` uses a console token. The pages and role rules are in [Console](/operate/console/). The first call is `GET /console/v1/setup`, then `POST /console/v1/setup` or `POST /console/v1/login`. A console token lasts 12 hours. The iOS app stores it in the Keychain and asks again in the last 10 minutes.
+
+`/mcp` is a separate audience. Browser clients use a one-hour access token and a 30-day refresh token. See [MCP](/operate/mcp/).

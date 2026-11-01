@@ -226,7 +226,14 @@ pub async fn migrate_all(
             }
             None => primary.clone(),
         };
-        apply_project_owned(pool.clone(), sql_dir.clone(), id, schema, extensions.to_vec()).await?;
+        apply_project_owned(
+            pool.clone(),
+            sql_dir.clone(),
+            id,
+            schema,
+            extensions.to_vec(),
+        )
+        .await?;
         crate::sql::ensure_project_role(&primary, &pool, seal_key, id, &pref).await?;
     }
     sync_schemas(&primary, dedicated.as_ref()).await?;

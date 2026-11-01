@@ -8,8 +8,10 @@ mod factors;
 mod flows;
 mod http_edge;
 mod lambda;
+mod mcp;
 mod mfa;
 mod oauth;
+mod oauth_as;
 mod project_auth;
 mod sites_proc;
 mod sql;
@@ -35,8 +37,7 @@ use reactor_sites::{
     verification_name, SITE_BODY_LIMIT,
 };
 use reactor_storage::{
-    clamp_expires, object_key, reserved_bucket, verify_signature, BlobStore,
-    FsStore, S3Store,
+    clamp_expires, object_key, reserved_bucket, verify_signature, BlobStore, FsStore, S3Store,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -82,7 +83,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    fn new(status: StatusCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
             status,
             message: message.into(),
@@ -91,13 +92,16 @@ impl ApiError {
     pub(crate) fn text(&self) -> &str {
         &self.message
     }
-    fn unauthorized(message: impl Into<String>) -> Self {
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
+    pub(crate) fn unauthorized(message: impl Into<String>) -> Self {
         Self::new(StatusCode::UNAUTHORIZED, message)
     }
-    fn forbidden(message: impl Into<String>) -> Self {
+    pub(crate) fn forbidden(message: impl Into<String>) -> Self {
         Self::new(StatusCode::FORBIDDEN, message)
     }
-    fn not_found() -> Self {
+    pub(crate) fn not_found() -> Self {
         Self::new(StatusCode::NOT_FOUND, "not found")
     }
 }
@@ -449,6 +453,10 @@ pub fn router(ctx: AppCtx, extra: Router<AppCtx>) -> Router {
                 axum::routing::delete(delete_domain),
             )
             .fallback(site_fallback);
+    }
+    if all || handler == "auth" || handler == "platform" {
+        app = oauth_as::mount(app);
+        app = mcp::mount(app);
     }
     if all || handler == "platform" {
         app = console::mount(app);
@@ -1374,9 +1382,7 @@ async fn public_object(
         .map(|pref| pref.as_str().to_string())
         .ok_or_else(ApiError::not_found)?;
     let (bucket, key) = buckets::split_public_path(&path)?;
-    let cached = state
-        .bucket_flags
-        .get(&buckets::cache_key(&pref, &bucket));
+    let cached = state.bucket_flags.get(&buckets::cache_key(&pref, &bucket));
     let public = if let Some(flag) = cached {
         flag
     } else {
@@ -1410,10 +1416,7 @@ async fn public_object(
     Ok((
         [
             (header::CONTENT_TYPE, content_type),
-            (
-                header::CACHE_CONTROL,
-                "public, max-age=86400".to_string(),
-            ),
+            (header::CACHE_CONTROL, "public, max-age=86400".to_string()),
         ],
         bytes,
     )

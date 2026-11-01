@@ -25,6 +25,10 @@ Zip entries that contain `..` or start with `/` are rejected.
 
 Presign checks the project prefix before it issues a URL. `_functions` and `_sites` are refused. A bucket with no row still expires in 300 seconds, or the requested `expires_in` up to the cap. A bucket row is checked with the caller's role and row-level security before a URL is issued. Filesystem URLs are HMAC'd with `storage.sign_secret`. A public bucket's read URL has no signature.
 
+## MCP
+
+`/mcp` rejects a console JWT, a console service key, and a project JWT. A browser client receives an access token for one hour, with `aud` set to `{public_url}/mcp`, and a refresh token for 30 days. The refresh token is stored as a hash and rotates on every use. Presenting one that was already rotated deletes that family. A bearer key prefixed `rtr_mcp_` is also stored as a hash and lasts until an operator revokes it. Tool results omit service keys, passwords, and secret env values.
+
 ## Operator routes
 
 `POST /platform/v1/projects`, migrate, and `POST /fn/v1/_internal/cron` require the operator token. That token is not a project key. Console routes require a console session and a membership. Rotating keys and deleting a project are limited to admin and owner.
